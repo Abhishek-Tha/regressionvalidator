@@ -20,6 +20,7 @@ import {
   hashConfig,
   createEmptyIndex,
   waitForUrl,
+  pageExists,
 } from '@blockguard/core';
 import { upsertPrComment, upsertCheckRun } from './github-client.js';
 import type { PageComparisonResult } from '@blockguard/core';
@@ -157,7 +158,23 @@ async function run(): Promise<void> {
       core.warning(`Page discovery failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    core.info(`Discovered ${pages.length} pages`);
+    // Filter to only pages that are actually published on the live (.aem.live) origin.
+    // Pages discovered from query-index but not yet live will return 404 and must be skipped.
+    core.info(`Discovered ${pages.length} pages — verifying each exists on live origin...`);
+    const publishedPages: typeof pages = [];
+    await Promise.all(
+      pages.map(async (p) => {
+        const liveUrl = `${liveOrigin}${p.path}`;
+        if (await pageExists(liveUrl)) {
+          publishedPages.push(p);
+        } else {
+          core.debug(`Skipping unpublished page (404 on live): ${liveUrl}`);
+        }
+      }),
+    );
+    pages = publishedPages;
+
+    core.info(`${pages.length} published pages found on live origin`);
 
     // Build a minimal usage index from the discovered pages + impact
     const configHash = hashConfig(config);
@@ -212,6 +229,13 @@ async function run(): Promise<void> {
           const compDir = join(outputDir, 'comparisons', page.path.replace(/\//g, '_'), viewport.name);
 
           try {
+            // Skip pages that are not published on the preview branch (404).
+            // These are pages that exist on live but haven't been pushed to this branch.
+            if (previewReady && !(await pageExists(branchUrl))) {
+              core.info(`  Skipping ${page.path} @ ${viewport.name} — not published on preview branch`);
+              continue;
+            }
+
             // Capture screenshots
             const [baseScreenshots, branchScreenshots] = await Promise.all([
               captureMultiViewport(browser, baseUrl, 'before', [viewport], compDir, config.capture),

@@ -152,3 +152,16 @@ export async function waitForUrl(
   }
   return false;
 }
+
+/**
+ * Check whether a URL is reachable and returns a 2xx response.
+ * Used to skip pages that are not published on preview/live.
+ */
+export async function pageExists(url: string): Promise<boolean> {
+  try {
+    const response = await fetch(url, { method: 'HEAD' });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
