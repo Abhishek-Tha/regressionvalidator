@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# TypeScript build outputs (intermediate, not needed by GitHub Actions)
+packages/*/dist/
+packages/*/tsconfig.tsbuildinfo
+
+# Keep the ncc-bundled action output — GitHub Actions reads dist-bundled/index.js
+!packages/action/dist-bundled/
+
+# Test coverage
+coverage/
+lcov.info
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/settings.json
+.idea/
+
+# Temp report output
+/tmp/
