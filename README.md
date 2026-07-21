@@ -2,7 +2,7 @@
 
 **EDS Block Regression Validator** — a GitHub-native regression and impact-analysis solution for Adobe Edge Delivery Services (EDS) projects.
 
-BlockGuard detects changed blocks in a pull request, finds every page using those blocks, compares the PR preview against the live baseline at mobile and desktop viewports, and reports regressions before UAT.
+BlockGuard detects changed blocks in a pull request, scans every published live page to find which ones actually use those blocks, screenshots live vs. preview at mobile and desktop viewports, and reports regressions before UAT.
 
 ---
 
@@ -12,11 +12,11 @@ BlockGuard detects changed blocks in a pull request, finds every page using thos
 blockguard/
 ├── packages/
 │   ├── core/          @blockguard/core — deterministic engine
-│   ├── action/        blockguard-action — GitHub Action wrapper
+│   ├── action/        blockguard-action — GitHub Action (composite)
 │   └── cli/           @blockguard/cli — local CLI
 ├── examples/
 │   ├── blockguard.config.yml   — annotated config template
-│   └── consumer-workflow.yml   — copy to your EDS repo
+│   └── consumer-workflow.yml   — copy this to your EDS repo
 └── .github/workflows/ci.yml    — BlockGuard's own CI
 ```
 
@@ -26,51 +26,62 @@ blockguard/
 
 ### Option 1 — GitHub Action (recommended)
 
-This is the primary and recommended way to use BlockGuard. No local setup required.
+No local setup. Chrome is installed automatically by the action — you do **not** need any `npx puppeteer browsers install` steps in your workflow.
 
-**Step 1:** Copy `examples/consumer-workflow.yml` to your EDS repository:
+**Step 1:** Copy `examples/consumer-workflow.yml` from this repo into your EDS repository, renaming it to `blockguard.yml`:
 
 ```
+# Source (this repo):
+examples/consumer-workflow.yml
+
+# Destination (your EDS repo):
 your-eds-repo/
 └── .github/workflows/blockguard.yml
 ```
 
-**Step 2:** Copy `examples/blockguard.config.yml` to your EDS repository root:
+**Step 2 (optional):** Copy `examples/blockguard.config.yml` to your EDS repository root for advanced configuration:
 
 ```
 your-eds-repo/
 └── blockguard.config.yml
 ```
 
-**Step 3:** Update the owner and repo values in the workflow:
+**Step 3:** Update the four values marked with `←` in the workflow:
 
 ```yaml
-- uses: your-org/blockguard-action@v1
-  with:
-    owner: your-org
-    repo: your-eds-site
-    page-index-url: https://main--your-eds-site--your-org.aem.live/query-index.json
-    github-token: ${{ secrets.GITHUB_TOKEN }}
-    mode: representative
-    fail-on-regression: 'false'   # advisory mode during rollout
+      - name: Run BlockGuard regression
+        id: blockguard
+        uses: your-org/blockguard/packages/action@v1  # ← replace with your action repo and tag
+        with:
+          owner: your-org                     # ← GitHub username / org
+          repo: your-eds-site                 # ← EDS repo name (no URL)
+          base-branch: main
+          page-index-url: https://main--your-eds-site--your-org.aem.live/query-index.json  # ← live query-index URL
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          mode: representative
+          max-pages: '15'
+          fail-on-regression: 'false'         # advisory mode during rollout
+          advisory-mode: 'true'
 ```
 
-That is it. The Action runs automatically on every PR that touches `blocks/**`, `scripts/**`, or `styles/**`.
+That is it. The action triggers automatically on every PR that touches `blocks/**`, `scripts/**`, `styles/**`, `icons/**`, or `blockguard.config.yml`.
 
-The Action will:
-1. Detect which blocks changed in the PR
-2. Discover affected pages via `query-index.json`
-3. Wait for the EDS branch preview to become available
-4. Screenshot live and preview at mobile (390 px) and desktop (1440 px)
-5. Run pixel diff, DOM diff, accessibility, and runtime checks
-6. Post a consolidated PR comment and job summary
-7. Upload `blockguard-report/` as a workflow artifact (before/after/diff images + HTML report)
+---
+
+### What BlockGuard does on each PR
+
+1. **Impact analysis** — git diff to identify changed block folders under `blocks/`
+2. **Wait for EDS preview** — polls `${previewOrigin}/` until it responds (up to 2 min)
+3. **Discover published pages** — fetches `query-index.json` from the live origin; HEAD-checks each path to confirm it is published (404s are silently dropped)
+4. **Scan for real block usage** — Puppeteer loads each published live page and reads the actual DOM block classes; pages that do **not** use any of the changed blocks are excluded
+5. **Select representative pages** — picks a smart subset (up to `max-pages`) covering all block variations
+6. **Screenshot & compare** — captures before (live) and after (preview) at mobile (390 px) and desktop (1440 px); skips preview pages that return 404
+7. **Pixel diff + DOM diff** — pixelmatch + heading/overflow analysis
+8. **Post report** — PR comment, job summary, and `blockguard-report/` artifact (before/after/diff images + HTML report)
 
 ---
 
 ### Option 2 — CLI (local developer testing)
-
-Install globally and run against any branch:
 
 ```bash
 npm install -g @blockguard/cli
@@ -87,6 +98,83 @@ blockguard test cards --base main --head feature/cards
 # View the report
 blockguard report --format md
 ```
+
+---
+
+## Consumer workflow — abregtest example
+
+This is the workflow used in the [abregtest](https://github.com/abhishek-tha/abregtest) EDS repo (the reference test site for BlockGuard):
+
+```yaml
+# .github/workflows/blockguard.yml  (in your EDS repo)
+name: EDS Block Regression (BlockGuard)
+
+on:
+  pull_request:
+    paths:
+      - "blocks/**"
+      - "scripts/**"
+      - "styles/**"
+      - "icons/**"
+      - "blockguard.config.yml"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Test mode"
+        required: false
+        default: "representative"
+        type: choice
+        options:
+          - representative
+          - full
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+jobs:
+  blockguard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run BlockGuard regression
+        id: blockguard
+        uses: your-org/blockguard/packages/action@v1  # ← replace with your action repo and tag
+        with:
+          owner: abhishek-tha
+          repo: abregtest
+          base-branch: main
+          page-index-url: https://main--abregtest--abhishek-tha.aem.live/query-index.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          mode: representative
+          max-pages: '15'
+          fail-on-regression: 'false'
+          advisory-mode: 'true'
+
+      - name: Upload regression report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: blockguard-report
+          path: /tmp/blockguard-report/
+          retention-days: 14
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "Status:          ${{ steps.blockguard.outputs.status }}"
+          echo "Affected pages:  ${{ steps.blockguard.outputs.affected-pages }}"
+          echo "Tested pages:    ${{ steps.blockguard.outputs.tested-pages }}"
+```
+
+> **Note:** No manual Chrome/Puppeteer installation steps are needed. The BlockGuard composite action installs the correct Chrome version automatically on every run.
 
 ---
 
@@ -116,6 +204,8 @@ thresholds:
   failOnMissingBlock: true
 ```
 
+If `blockguard.config.yml` is absent, BlockGuard falls back to sensible defaults derived from the workflow inputs.
+
 ---
 
 ## What BlockGuard Checks
@@ -133,19 +223,46 @@ thresholds:
 
 ---
 
+## Action Inputs
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `owner` | ✅ | — | GitHub username or org |
+| `repo` | ✅ | — | EDS repository name |
+| `github-token` | ✅ | — | `${{ secrets.GITHUB_TOKEN }}` |
+| `base-branch` | | `main` | Base branch for git diff |
+| `page-index-url` | | — | Full URL to `query-index.json` |
+| `site-map-url` | | — | Full URL to `sitemap.xml` (fallback) |
+| `live-origin` | | auto | Override live origin URL |
+| `preview-origin` | | auto | Override preview origin URL |
+| `mode` | | `representative` | `representative` or `full` |
+| `max-pages` | | `15` | Max pages to test per run |
+| `fail-on-regression` | | `false` | Fail the workflow on regressions |
+| `advisory-mode` | | `true` | Post warnings only, never fail |
+| `output-dir` | | `/tmp/blockguard-report` | Report output directory |
+
+## Action Outputs
+
+| Output | Description |
+|--------|-------------|
+| `status` | `passed`, `warning`, or `failed` |
+| `affected-pages` | Pages that use the changed blocks |
+| `tested-pages` | Pages actually screenshotted and compared |
+| `report-path` | Path to the generated HTML report |
+| `run-id` | BlockGuard run identifier |
+
+---
+
 ## PR Report Example
 
 ```
 BlockGuard Regression Report
 
-Changed blocks:   cards
-Impact:           62 pages · 4 variations · 3 locales
-Tested:           12 representative pages · 2 viewports · 24 comparisons
+Changed blocks:   columns
+Impact:           3 published pages scanned · 2 use 'columns'
+Tested:           2 pages · 2 viewports · 4 comparisons
 
-Results:          20 passed · 3 warnings · 1 failed
-
-Failure:
-  Cards Featured variation overflows at 390 px width.
+Results:          3 passed · 1 warning · 0 failed
 ```
 
 Artifacts uploaded per run:
@@ -156,11 +273,13 @@ blockguard-report/
 ├── report.json
 ├── summary.md
 └── comparisons/
-    ├── page-a/
-    │   ├── before.png
-    │   ├── after.png
-    │   └── diff.png
-    └── page-b/
+    ├── _home/
+    │   ├── desktop/
+    │   │   ├── before-desktop.png
+    │   │   ├── after-desktop.png
+    │   │   └── diff-desktop.png
+    │   └── mobile/
+    └── _landing/
 ```
 
 ---
@@ -175,8 +294,8 @@ blockguard-report/
 ### Setup
 
 ```bash
-git clone https://github.com/your-org/blockguard.git
-cd blockguard
+git clone https://github.com/Abhishek-Tha/regressionvalidator.git
+cd regressionvalidator
 npm install
 npm run build
 npm run test
@@ -186,8 +305,8 @@ npm run test
 
 | Command | Description |
 |---------|-------------|
-| `npm run build` | Build all packages |
-| `npm run test` | Run unit tests (33 tests) |
+| `npm run build` | Build all packages (core → cli → action → mcp) |
+| `npm run test` | Run unit tests |
 | `npm run lint` | Lint all packages |
 | `npm run clean` | Remove all dist/ outputs |
 
@@ -197,10 +316,10 @@ npm run test
 packages/core/src/
 ├── config/         Schema validation and config loader
 ├── discovery/      Query-index and sitemap page discovery
-├── indexing/       Block detection and usage index
+├── indexing/       Block detection and page scanning
 ├── impact/         Git diff and dependency graph analysis
 ├── selection/      Representative page selection algorithm
-├── capture/        Puppeteer screenshot and stabilization
+├── capture/        Puppeteer screenshot, stabilization, pageExists
 ├── compare/        Visual, DOM, a11y, and runtime comparison
 └── reporting/      JSON, HTML, and Markdown report generation
 ```
@@ -230,7 +349,7 @@ Then expand to:
 - `GITHUB_TOKEN` is scoped to `contents: read`, `pull-requests: write`, `checks: write` only
 - No production credentials are exposed to PR runners
 - Screenshots are retained for 14 days (configurable)
-- Candidate pages are treated as untrusted content
+- Only published pages (verified via HEAD request against live origin) are tested
 
 ---
 

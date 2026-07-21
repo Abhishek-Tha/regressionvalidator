@@ -1,5 +1,11 @@
-# Copy this file to your EDS repository at .github/workflows/blockguard.yml
-# and adjust the owner/repo/page-index-url values.
+# ──────────────────────────────────────────────────────────────────────────────
+# BlockGuard — EDS Block Regression
+#
+# Copy this file to your EDS repository at:
+#   .github/workflows/blockguard.yml
+#
+# Then update the four values marked with ← below.
+# ──────────────────────────────────────────────────────────────────────────────
 
 name: EDS Block Regression (BlockGuard)
 
@@ -15,16 +21,13 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'Test mode'
+        description: "Test mode"
         required: false
-        default: 'representative'
+        default: "representative"
         type: choice
         options:
           - representative
           - full
-  # Nightly index refresh
-  schedule:
-    - cron: '0 2 * * 1-5'
 
 permissions:
   contents: read
@@ -40,31 +43,23 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # Full history required for git diff
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      # Chrome is installed automatically by the BlockGuard action itself.
-      # No manual Puppeteer install step needed here.
+          fetch-depth: 0 # Full history required for git diff
 
       - name: Run BlockGuard regression
         id: blockguard
-        uses: your-org/blockguard-action@v1    # Replace with your published action ref
+        uses: your-org/blockguard/packages/action@v1  # ← replace with your action repo and tag
         with:
-          owner: your-org
-          repo: your-eds-site
+          owner: your-org                          # ← your GitHub username / org
+          repo: your-eds-site                      # ← your EDS repo name
           base-branch: main
-          page-index-url: https://main--your-eds-site--your-org.aem.live/query-index.json
+          page-index-url: https://main--your-eds-site--your-org.aem.live/query-index.json  # ← live query-index URL
           github-token: ${{ secrets.GITHUB_TOKEN }}
           mode: ${{ inputs.mode || 'representative' }}
-          max-pages: '15'
-          fail-on-regression: 'false'   # Advisory mode during initial rollout
-          advisory-mode: 'true'
+          max-pages: "15"
+          fail-on-regression: "false"  # advisory mode — never blocks the PR
+          advisory-mode: "true"
 
-      - name: Upload regression artifacts
+      - name: Upload regression report
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -72,9 +67,9 @@ jobs:
           path: /tmp/blockguard-report/
           retention-days: 14
 
-      - name: Report status
+      - name: Summary
         if: always()
         run: |
-          echo "BlockGuard status: ${{ steps.blockguard.outputs.status }}"
-          echo "Affected pages: ${{ steps.blockguard.outputs.affected-pages }}"
-          echo "Tested pages: ${{ steps.blockguard.outputs.tested-pages }}"
+          echo "Status:          ${{ steps.blockguard.outputs.status }}"
+          echo "Affected pages:  ${{ steps.blockguard.outputs.affected-pages }}"
+          echo "Tested pages:    ${{ steps.blockguard.outputs.tested-pages }}"
