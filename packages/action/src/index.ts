@@ -7,7 +7,7 @@ import {
   analyzeImpact,
   selectRegressionPages,
   launchBrowser,
-  captureMultiViewport,
+  captureBlockClip,
   compareVisuals,
   classifyPageStatus,
   buildRegressionReport,
@@ -266,21 +266,39 @@ async function run(): Promise<void> {
           return;
         }
 
+        // Build a CSS selector for the first affected block on this page
+        // e.g. "columns" → ".columns" (matches <div class="columns ...">)
+        const blockSelector = affectedBlockNames.length > 0
+          ? affectedBlockNames.map((b) => `.${b}`).join(', ')
+          : config.blockDetection.selector;
+
         for (const viewport of config.viewports) {
-          core.info(`  Testing ${page.path} @ ${viewport.name}`);
+          core.info(`  Testing ${page.path} @ ${viewport.name} (clip: ${blockSelector})`);
           const compDir = join(outputDir, 'comparisons', page.path.replace(/\//g, '_'), viewport.name);
 
           try {
-            // Capture base and branch screenshots in parallel
-            const [baseScreenshots, branchScreenshots] = await Promise.all([
-              captureMultiViewport(sharedBrowser, baseUrl, 'before', [viewport], compDir, config.capture),
-              captureMultiViewport(sharedBrowser, branchUrl, 'after', [viewport], compDir, config.capture),
+            // Capture base and branch screenshots in parallel — clipped to the changed block
+            const [baseShot, branchShot] = await Promise.all([
+              captureBlockClip({
+                browser: sharedBrowser, url: baseUrl, label: 'before',
+                viewport, outputDir: compDir, captureConfig: config.capture,
+                blockSelector,
+              }),
+              captureBlockClip({
+                browser: sharedBrowser, url: branchUrl, label: 'after',
+                viewport, outputDir: compDir, captureConfig: config.capture,
+                blockSelector,
+              }),
             ]);
 
-            const baseShot = baseScreenshots[0];
-            const branchShot = branchScreenshots[0];
+            if (!baseShot.blockFound) {
+              core.info(`    Block not found on live (${page.path}) — used full-page fallback`);
+            }
+            if (!branchShot.blockFound && branchShot.success) {
+              core.warning(`    Block '${blockSelector}' missing from preview branch on ${page.path} — possible regression`);
+            }
 
-            if (!baseShot?.success || !branchShot?.success) {
+            if (!baseShot.success || !branchShot.success) {
               comparisons.push({
                 pagePath: page.path, baseUrl, branchUrl, viewport: viewport.name,
                 status: 'unable-to-test', selectionReasons: reasons, affectedBlocks: affectedBlockNames,
