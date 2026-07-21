@@ -70,14 +70,19 @@ inputs:
 outputs:
   status:
     description: 'Regression result: passed, warning, or failed'
+    value: ${{ steps.blockguard-run.outputs.status }}
   affected-pages:
     description: 'Number of pages affected by the changed blocks'
+    value: ${{ steps.blockguard-run.outputs.affected-pages }}
   tested-pages:
     description: 'Number of pages actually tested'
+    value: ${{ steps.blockguard-run.outputs.tested-pages }}
   report-path:
     description: 'Path to the generated HTML report'
+    value: ${{ steps.blockguard-run.outputs.report-path }}
   run-id:
     description: 'BlockGuard run identifier'
+    value: ${{ steps.blockguard-run.outputs.run-id }}
 
 runs:
   using: 'composite'
@@ -106,14 +111,16 @@ runs:
           libdrm2
 
     # ── Download Chrome into the runner cache ──────────────────────────────────
+    # Pin to puppeteer@22 so it installs the exact Chrome revision the bundle expects.
     - name: Install Chrome for Puppeteer
       shell: bash
       env:
         PUPPETEER_CACHE_DIR: /home/runner/.cache/puppeteer
-      run: npx puppeteer browsers install chrome
+      run: npx puppeteer@22 browsers install chrome
 
     # ── Run the bundled action ─────────────────────────────────────────────────
     - name: Run BlockGuard
+      id: blockguard-run
       shell: bash
       env:
         PUPPETEER_CACHE_DIR: /home/runner/.cache/puppeteer
