@@ -45,7 +45,10 @@ async function run(): Promise<void> {
     const headBranch =
       context.payload.pull_request?.head?.ref?.replace('refs/heads/', '') ?? 'HEAD';
 
-    const baseRef = core.getInput('base-ref') || `${baseBranch}`;
+    // In GitHub Actions shallow clones, local branch refs like "main" are not present.
+    // Use the PR base SHA directly when available, otherwise fall back to origin/<branch>.
+    const prBaseSha = context.payload.pull_request?.base?.sha;
+    const baseRef = core.getInput('base-ref') || prBaseSha || `origin/${baseBranch}`;
     const headRef = core.getInput('head-ref') || headSha;
 
     // ─── Load Config ───────────────────────────────────────────────────────────
