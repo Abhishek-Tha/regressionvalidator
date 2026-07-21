@@ -1,0 +1,1 @@
+{"version":3,"file":"impact-analyzer.d.ts","sourceRoot":"","sources":["../../src/impact/impact-analyzer.ts"],"names":[],"mappings":"AAOA,OAAO,EAAE,cAAc,EAA2B,MAAM,YAAY,CAAC;AAErE,MAAM,WAAW,cAAc;IAC7B,OAAO,EAAE,MAAM,CAAC;IAChB,OAAO,EAAE,MAAM,CAAC;IAChB,WAAW,EAAE,MAAM,CAAC;CACrB;AAED;;GAEG;AACH,wBAAsB,aAAa,CAAC,OAAO,EAAE,cAAc,GAAG,OAAO,CAAC,cAAc,CAAC,CAiDpF"}

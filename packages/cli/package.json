@@ -1,0 +1,22 @@
+{
+  "name": "@blockguard/cli",
+  "version": "0.1.0",
+  "description": "BlockGuard CLI — run regression checks from the command line",
+  "bin": {
+    "blockguard": "dist/index.js"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc --build",
+    "clean": "rimraf dist tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "@blockguard/core": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "rimraf": "^5.0.0",
+    "typescript": "^5.4.0"
+  }
+}

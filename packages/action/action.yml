@@ -1,0 +1,84 @@
+name: 'BlockGuard — EDS Block Regression'
+description: 'Detect changed EDS blocks, find affected pages, compare base vs PR preview, and report regressions'
+author: 'BlockGuard'
+
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  owner:
+    description: 'GitHub repository owner'
+    required: true
+  repo:
+    description: 'GitHub repository name'
+    required: true
+  base-branch:
+    description: 'Base branch to compare against'
+    required: false
+    default: 'main'
+  base-ref:
+    description: 'Base git ref for diff (defaults to PR base SHA)'
+    required: false
+  head-ref:
+    description: 'Head git ref for diff (defaults to PR head SHA)'
+    required: false
+  site-map-url:
+    description: 'Full URL to sitemap.xml (e.g. https://main--repo--owner.aem.live/sitemap.xml)'
+    required: false
+  page-index-url:
+    description: 'Full URL to query-index.json'
+    required: false
+  live-origin:
+    description: 'Live site origin (e.g. https://main--repo--owner.aem.live)'
+    required: false
+  preview-origin:
+    description: 'Branch preview origin (e.g. https://feature--repo--owner.aem.page)'
+    required: false
+  config:
+    description: 'Path to blockguard.config.yml'
+    required: false
+    default: 'blockguard.config.yml'
+  mode:
+    description: 'Test mode: representative or full'
+    required: false
+    default: 'representative'
+  max-pages:
+    description: 'Maximum pages to test per run'
+    required: false
+    default: '15'
+  viewport-width:
+    description: 'Screenshot viewport width in pixels'
+    required: false
+    default: '1440'
+  fail-on-regression:
+    description: 'Set to "true" to fail the workflow on regressions'
+    required: false
+    default: 'false'
+  advisory-mode:
+    description: 'Set to "true" to always pass the workflow (post warnings only)'
+    required: false
+    default: 'true'
+  output-dir:
+    description: 'Directory for report output'
+    required: false
+    default: '/tmp/blockguard-report'
+  github-token:
+    description: 'GitHub token for posting PR comments and uploading artifacts'
+    required: true
+
+outputs:
+  status:
+    description: 'Regression result: passed, warning, or failed'
+  affected-pages:
+    description: 'Number of pages affected by the changed blocks'
+  tested-pages:
+    description: 'Number of pages actually tested'
+  report-path:
+    description: 'Path to the generated HTML report'
+  run-id:
+    description: 'BlockGuard run identifier'
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'

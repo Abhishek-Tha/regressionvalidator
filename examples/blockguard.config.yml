@@ -1,0 +1,80 @@
+version: 1
+
+site:
+  owner: your-org
+  repo: your-eds-site
+  baseBranch: main
+  # Optional: explicit live host (defaults to {baseBranch}--{repo}--{owner}.aem.live)
+  # liveHost: main--your-eds-site--your-org.aem.live
+  # Optional: pattern for preview URLs (defaults to {branch}--{repo}--{owner}.aem.page)
+  # previewHostPattern: "{branch}--your-eds-site--your-org.aem.page"
+
+discovery:
+  # Preferred: use the EDS query-index for fast, structured page discovery
+  pageIndex: /query-index.json
+  # Fallback: use sitemap
+  # sitemap: /sitemap.xml
+  include:
+    - "/**"
+  exclude:
+    - "/drafts/**"
+    - "/tools/**"
+    - "/admin/**"
+
+blockDetection:
+  selector: ".block"
+  nameStrategy: class
+  ignoredClasses:
+    - block
+    - initialized
+    - loading
+  variationStrategy: remaining-classes
+
+selection:
+  mode: representative         # representative | full
+  maximumPages: 20
+  includeEveryVariation: true
+  pagesPerVariation: 2
+  # includeLocales:
+  #   - en-us
+  #   - en-gb
+  prioritize:
+    - traffic
+    - multiple-instances
+    - longest-content
+
+capture:
+  disableAnimations: true
+  waitForFonts: true
+  waitForImages: true
+  maskSelectors:
+    - ".timestamp"
+    - ".personalized-content"
+    - ".rotating-banner"
+    - "[data-dynamic]"
+  hideSelectors:
+    - ".cookie-banner"
+    - ".consent-modal"
+  waitForSelectors:
+    - "main .block"
+  delayMs: 500
+  timezone: UTC
+  locale: en-US
+
+viewports:
+  - name: mobile
+    width: 390
+    height: 844
+  - name: desktop
+    width: 1440
+    height: 1000
+
+thresholds:
+  visualWarning: 0.5         # % pixel mismatch → warning
+  visualFailure: 3.0         # % pixel mismatch → failure
+  newConsoleErrorsFailure: 1 # new JS errors → failure
+  failOnNewCriticalAccessibilityIssue: true
+  failOnMissingBlock: true
+  failOnHorizontalOverflow: true
+
+outputDir: /tmp/blockguard-report

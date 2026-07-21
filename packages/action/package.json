@@ -1,0 +1,24 @@
+{
+  "name": "blockguard-action",
+  "version": "0.1.0",
+  "description": "BlockGuard GitHub Action — EDS block regression validation on PRs",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc --build && node scripts/bundle.js",
+    "build:ts": "tsc --build",
+    "clean": "rimraf dist tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "@actions/core": "^1.10.0",
+    "@actions/github": "^6.0.0",
+    "@blockguard/core": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@vercel/ncc": "^0.38.0",
+    "rimraf": "^5.0.0",
+    "typescript": "^5.4.0"
+  }
+}

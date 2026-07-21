@@ -1,0 +1,87 @@
+# Copy this file to your EDS repository at .github/workflows/blockguard.yml
+# and adjust the owner/repo/page-index-url values.
+
+name: EDS Block Regression (BlockGuard)
+
+on:
+  pull_request:
+    paths:
+      - "blocks/**"
+      - "scripts/**"
+      - "styles/**"
+      - "icons/**"
+      - "blockguard.config.yml"
+  # Manual trigger for ad-hoc testing
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Test mode'
+        required: false
+        default: 'representative'
+        type: choice
+        options:
+          - representative
+          - full
+  # Nightly index refresh
+  schedule:
+    - cron: '0 2 * * 1-5'
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+jobs:
+  blockguard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # Full history required for git diff
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Install Chromium dependencies on Ubuntu
+      - name: Install Puppeteer dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libnss3 libatk1.0-0 libatk-bridge2.0-0 \
+            libcups2 libxcomposite1 libxdamage1 \
+            libxrandr2 libgbm1 libxkbcommon0 libpango-1.0-0 \
+            libcairo2 libasound2
+
+      - name: Run BlockGuard regression
+        id: blockguard
+        uses: your-org/blockguard-action@v1    # Replace with your published action ref
+        with:
+          owner: your-org
+          repo: your-eds-site
+          base-branch: main
+          page-index-url: https://main--your-eds-site--your-org.aem.live/query-index.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          mode: ${{ inputs.mode || 'representative' }}
+          max-pages: '15'
+          fail-on-regression: 'false'   # Advisory mode during initial rollout
+          advisory-mode: 'true'
+
+      - name: Upload regression artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: blockguard-report
+          path: /tmp/blockguard-report/
+          retention-days: 14
+
+      - name: Report status
+        if: always()
+        run: |
+          echo "BlockGuard status: ${{ steps.blockguard.outputs.status }}"
+          echo "Affected pages: ${{ steps.blockguard.outputs.affected-pages }}"
+          echo "Tested pages: ${{ steps.blockguard.outputs.tested-pages }}"
