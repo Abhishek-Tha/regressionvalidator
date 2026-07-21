@@ -21,6 +21,7 @@ import {
   createEmptyIndex,
   waitForUrl,
   pageExists,
+  scanPage,
 } from '@blockguard/core';
 import { upsertPrComment, upsertCheckRun } from './github-client.js';
 import type { PageComparisonResult } from '@blockguard/core';
@@ -175,28 +176,51 @@ async function run(): Promise<void> {
     pages = publishedPages;
 
     core.info(`${pages.length} published pages found on live origin`);
+    core.endGroup();
 
-    // Build a minimal usage index from the discovered pages + impact
+    // ─── Step 3b: Scan published pages to detect real block usage ─────────────
+    core.startGroup('🔎 Scanning pages for block usage');
     const configHash = hashConfig(config);
     let index = createEmptyIndex(`${owner}/${repo}`, headRef, configHash);
 
-    // Map discovered pages to indexed pages using affected block names from impact
-    const indexedPages = pages.map((p) => ({
-      path: p.path,
-      url: `${liveOrigin}${p.path}`,
-      site: `${owner}/${repo}`,
-      locale: 'en',
-      lastScanned: new Date().toISOString(),
-      // Optimistic: assume all pages use all affected blocks (will be refined by Puppeteer scan in full mode)
-      blocks: impact.allAffectedBlocks.map((name) => ({
-        name,
-        variations: ['default'],
-        instances: 1,
-        signatures: [`${name}:default:1`],
-      })),
-    }));
+    const scanBrowser = await launchBrowser();
+    const indexedPages: Awaited<ReturnType<typeof scanPage>>[] = [];
 
-    index = { ...index, pages: indexedPages };
+    try {
+      for (const p of pages) {
+        const liveUrl = `${liveOrigin}${p.path}`;
+        core.info(`  Scanning ${p.path} for blocks...`);
+        try {
+          const scanned = await scanPage(
+            scanBrowser,
+            liveUrl,
+            p.path,
+            `${owner}/${repo}`,
+            'en',
+            config.blockDetection,
+          );
+          indexedPages.push(scanned);
+          const names = scanned.blocks.map((b) => b.name).join(', ') || 'none';
+          core.info(`    Found blocks: ${names}`);
+        } catch (err) {
+          core.warning(`  Failed to scan ${p.path}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    } finally {
+      await scanBrowser.close();
+    }
+
+    // Keep only pages that actually use at least one of the changed blocks
+    const affectedSet = new Set(impact.allAffectedBlocks.map((b) => b.toLowerCase()));
+    const relevantPages = indexedPages.filter((p) =>
+      p.blocks.some((b) => affectedSet.has(b.name.toLowerCase())),
+    );
+
+    core.info(
+      `${relevantPages.length} / ${indexedPages.length} pages use a changed block (${impact.allAffectedBlocks.join(', ')})`,
+    );
+
+    index = { ...index, pages: relevantPages };
     core.endGroup();
 
     // ─── Step 4: Select pages ─────────────────────────────────────────────────
