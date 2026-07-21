@@ -59,9 +59,11 @@ export async function captureScreenshot(options: CapturePageOptions): Promise<Sc
 
     await stabilizePage(page, captureConfig);
 
+    // Viewport-only screenshot by default (faster, smaller files).
+    // Set fullPage: true in captureConfig if full-scroll capture is needed.
     await page.screenshot({
       path: filePath as `${string}.png`,
-      fullPage: true,
+      fullPage: (captureConfig as { fullPage?: boolean }).fullPage === true,
     });
 
     return {

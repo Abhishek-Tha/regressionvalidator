@@ -26,6 +26,22 @@ import {
 import { upsertPrComment, upsertCheckRun } from './github-client.js';
 import type { PageComparisonResult } from '@blockguard/core';
 
+/** Run at most `limit` async tasks concurrently. */
+async function withConcurrency<T>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<void>,
+): Promise<void> {
+  const queue = [...items];
+  const workers = Array.from({ length: Math.min(limit, queue.length) }, async () => {
+    while (queue.length > 0) {
+      const item = queue.shift();
+      if (item !== undefined) await fn(item);
+    }
+  });
+  await Promise.all(workers);
+}
+
 async function run(): Promise<void> {
   try {
     // ─── Read Inputs ───────────────────────────────────────────────────────────
@@ -34,7 +50,7 @@ async function run(): Promise<void> {
     const baseBranch = core.getInput('base-branch') || 'main';
     const configPath = core.getInput('config') || 'blockguard.config.yml';
     const mode = (core.getInput('mode') || 'representative') as 'representative' | 'full';
-    const maxPages = parseInt(core.getInput('max-pages') || '15', 10);
+    const maxPages = parseInt(core.getInput('max-pages') || '10', 10);
     const failOnRegression = core.getInput('fail-on-regression') === 'true';
     const advisoryMode = core.getInput('advisory-mode') !== 'false';
     const outputDir = core.getInput('output-dir') || '/tmp/blockguard-report';
@@ -47,8 +63,6 @@ async function run(): Promise<void> {
     const headBranch =
       context.payload.pull_request?.head?.ref?.replace('refs/heads/', '') ?? 'HEAD';
 
-    // In GitHub Actions shallow clones, local branch refs like "main" are not present.
-    // Use the PR base SHA directly when available, otherwise fall back to origin/<branch>.
     const prBaseSha = context.payload.pull_request?.base?.sha;
     const baseRef = core.getInput('base-ref') || prBaseSha || `origin/${baseBranch}`;
     const headRef = core.getInput('head-ref') || headSha;
@@ -81,18 +95,18 @@ async function run(): Promise<void> {
           },
           capture: {
             disableAnimations: true,
-            waitForFonts: true,
-            waitForImages: true,
+            waitForFonts: false,        // ← skip font wait for speed
+            waitForImages: false,       // ← skip image wait for speed
             maskSelectors: ['.timestamp', '.personalized-content'],
             hideSelectors: ['.cookie-banner'],
             waitForSelectors: ['main .block'],
-            delayMs: 500,
+            delayMs: 200,              // ← reduced from 500ms
             timezone: 'UTC',
             locale: 'en-US',
           },
+          // ← desktop only by default; add mobile in blockguard.config.yml if needed
           viewports: [
-            { name: 'mobile', width: 390, height: 844 },
-            { name: 'desktop', width: 1440, height: 1000 },
+            { name: 'desktop', width: 1440, height: 900 },
           ],
           thresholds: {
             visualWarning: 0.5,
@@ -105,10 +119,8 @@ async function run(): Promise<void> {
           outputDir,
         });
 
-    const liveOrigin =
-      core.getInput('live-origin') || resolveLiveOrigin(config);
-    const previewOrigin =
-      core.getInput('preview-origin') || resolvePreviewOrigin(config, headBranch);
+    const liveOrigin = core.getInput('live-origin') || resolveLiveOrigin(config);
+    const previewOrigin = core.getInput('preview-origin') || resolvePreviewOrigin(config, headBranch);
 
     core.info(`\n🛡️  BlockGuard starting`);
     core.info(`   Base:    ${liveOrigin}`);
@@ -116,11 +128,7 @@ async function run(): Promise<void> {
 
     // ─── Step 1: Impact Analysis ───────────────────────────────────────────────
     core.startGroup('📊 Impact Analysis');
-    const impact = await analyzeImpact({
-      baseRef,
-      headRef,
-      projectRoot: process.cwd(),
-    });
+    const impact = await analyzeImpact({ baseRef, headRef, projectRoot: process.cwd() });
 
     core.info(`Risk: ${impact.risk}`);
     core.info(`Changed blocks: ${impact.allAffectedBlocks.join(', ') || 'none'}`);
@@ -135,15 +143,15 @@ async function run(): Promise<void> {
     }
     core.endGroup();
 
-    // ─── Step 2: Wait for preview ─────────────────────────────────────────────
+    // ─── Step 2: Wait for preview (max 90s, poll every 5s) ────────────────────
     core.startGroup('⏳ Waiting for EDS preview');
-    const previewReady = await waitForUrl(`${previewOrigin}/`, 120_000);
+    const previewReady = await waitForUrl(`${previewOrigin}/`, 90_000, 5_000);
     if (!previewReady) {
-      core.warning(`Preview not available at ${previewOrigin} after 2 minutes — skipping visual tests`);
+      core.warning(`Preview not available at ${previewOrigin} after 90s — skipping visual tests`);
     }
     core.endGroup();
 
-    // ─── Step 3: Discover pages ───────────────────────────────────────────────
+    // ─── Step 3: Discover + verify published pages ────────────────────────────
     core.startGroup('🔍 Discovering pages');
     let pages: { path: string; url: string }[] = [];
 
@@ -159,40 +167,39 @@ async function run(): Promise<void> {
       core.warning(`Page discovery failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    // Filter to only pages that are actually published on the live (.aem.live) origin.
-    // Pages discovered from query-index but not yet live will return 404 and must be skipped.
+    // Parallel HEAD-check — only keep pages published on live origin
     core.info(`Discovered ${pages.length} pages — verifying each exists on live origin...`);
     const publishedPages: typeof pages = [];
     await Promise.all(
       pages.map(async (p) => {
-        const liveUrl = `${liveOrigin}${p.path}`;
-        if (await pageExists(liveUrl)) {
+        if (await pageExists(`${liveOrigin}${p.path}`)) {
           publishedPages.push(p);
         } else {
-          core.debug(`Skipping unpublished page (404 on live): ${liveUrl}`);
+          core.debug(`Skipping unpublished page: ${p.path}`);
         }
       }),
     );
     pages = publishedPages;
-
-    core.info(`${pages.length} published pages found on live origin`);
+    core.info(`${pages.length} published pages on live origin`);
     core.endGroup();
 
-    // ─── Step 3b: Scan published pages to detect real block usage ─────────────
+    // ─── Step 3b: Scan pages for block usage (parallel, concurrency=3) ────────
+    // Single shared browser used for scan AND capture — avoids two browser launches
     core.startGroup('🔎 Scanning pages for block usage');
     const configHash = hashConfig(config);
     let index = createEmptyIndex(`${owner}/${repo}`, headRef, configHash);
 
-    const scanBrowser = await launchBrowser();
+    // Launch ONE browser, reused across scan + capture phases
+    const sharedBrowser = await launchBrowser();
     const indexedPages: Awaited<ReturnType<typeof scanPage>>[] = [];
 
     try {
-      for (const p of pages) {
+      await withConcurrency(pages, 3, async (p) => {
         const liveUrl = `${liveOrigin}${p.path}`;
-        core.info(`  Scanning ${p.path} for blocks...`);
+        core.info(`  Scanning ${p.path}...`);
         try {
           const scanned = await scanPage(
-            scanBrowser,
+            sharedBrowser,
             liveUrl,
             p.path,
             `${owner}/${repo}`,
@@ -200,27 +207,26 @@ async function run(): Promise<void> {
             config.blockDetection,
           );
           indexedPages.push(scanned);
-          const names = scanned.blocks.map((b) => b.name).join(', ') || 'none';
-          core.info(`    Found blocks: ${names}`);
+          core.info(`    Blocks: ${scanned.blocks.map((b) => b.name).join(', ') || 'none'}`);
         } catch (err) {
           core.warning(`  Failed to scan ${p.path}: ${err instanceof Error ? err.message : String(err)}`);
         }
-      }
-    } finally {
-      await scanBrowser.close();
+      });
+
+      // Filter to pages that use a changed block
+      const affectedSet = new Set(impact.allAffectedBlocks.map((b) => b.toLowerCase()));
+      const relevantPages = indexedPages.filter((p) =>
+        p.blocks.some((b) => affectedSet.has(b.name.toLowerCase())),
+      );
+
+      core.info(
+        `${relevantPages.length} / ${indexedPages.length} pages use changed block(s): ${impact.allAffectedBlocks.join(', ')}`,
+      );
+      index = { ...index, pages: relevantPages };
+    } catch (err) {
+      await sharedBrowser.close();
+      throw err;
     }
-
-    // Keep only pages that actually use at least one of the changed blocks
-    const affectedSet = new Set(impact.allAffectedBlocks.map((b) => b.toLowerCase()));
-    const relevantPages = indexedPages.filter((p) =>
-      p.blocks.some((b) => affectedSet.has(b.name.toLowerCase())),
-    );
-
-    core.info(
-      `${relevantPages.length} / ${indexedPages.length} pages use a changed block (${impact.allAffectedBlocks.join(', ')})`,
-    );
-
-    index = { ...index, pages: relevantPages };
     core.endGroup();
 
     // ─── Step 4: Select pages ─────────────────────────────────────────────────
@@ -230,40 +236,45 @@ async function run(): Promise<void> {
       impact.allAffectedBlocks,
       config.selection,
     );
-
-    core.info(
-      `Selected ${selectionResult.selected.length} / ${selectionResult.totalAffected} pages for testing`,
-    );
+    core.info(`Selected ${selectionResult.selected.length} / ${selectionResult.totalAffected} pages`);
     core.endGroup();
 
-    // ─── Step 5: Capture & compare ─────────────────────────────────────────────
+    // ─── Step 5: Capture & compare (parallel pages, concurrency=3) ────────────
     core.startGroup('📸 Capturing screenshots and comparing');
     const comparisons: PageComparisonResult[] = [];
     const runId = `bg-${Date.now()}`;
-    const browser = await launchBrowser();
 
     try {
-      for (const { page, reasons, affectedBlockNames } of selectionResult.selected) {
+      // Check preview existence for each unique page path upfront (parallel)
+      const previewExistsMap = new Map<string, boolean>();
+      if (previewReady) {
+        await Promise.all(
+          selectionResult.selected.map(async ({ page }) => {
+            const branchUrl = `${previewOrigin}${page.path}`;
+            previewExistsMap.set(page.path, await pageExists(branchUrl));
+          }),
+        );
+      }
+
+      // Process pages concurrently (3 at a time) with viewports sequential per page
+      await withConcurrency(selectionResult.selected, 3, async ({ page, reasons, affectedBlockNames }) => {
         const baseUrl = `${liveOrigin}${page.path}`;
         const branchUrl = `${previewOrigin}${page.path}`;
 
+        if (previewReady && !previewExistsMap.get(page.path)) {
+          core.info(`  Skipping ${page.path} — not on preview branch`);
+          return;
+        }
+
         for (const viewport of config.viewports) {
           core.info(`  Testing ${page.path} @ ${viewport.name}`);
-
           const compDir = join(outputDir, 'comparisons', page.path.replace(/\//g, '_'), viewport.name);
 
           try {
-            // Skip pages that are not published on the preview branch (404).
-            // These are pages that exist on live but haven't been pushed to this branch.
-            if (previewReady && !(await pageExists(branchUrl))) {
-              core.info(`  Skipping ${page.path} @ ${viewport.name} — not published on preview branch`);
-              continue;
-            }
-
-            // Capture screenshots
+            // Capture base and branch screenshots in parallel
             const [baseScreenshots, branchScreenshots] = await Promise.all([
-              captureMultiViewport(browser, baseUrl, 'before', [viewport], compDir, config.capture),
-              captureMultiViewport(browser, branchUrl, 'after', [viewport], compDir, config.capture),
+              captureMultiViewport(sharedBrowser, baseUrl, 'before', [viewport], compDir, config.capture),
+              captureMultiViewport(sharedBrowser, branchUrl, 'after', [viewport], compDir, config.capture),
             ]);
 
             const baseShot = baseScreenshots[0];
@@ -271,36 +282,22 @@ async function run(): Promise<void> {
 
             if (!baseShot?.success || !branchShot?.success) {
               comparisons.push({
-                pagePath: page.path,
-                baseUrl,
-                branchUrl,
-                viewport: viewport.name,
-                status: 'unable-to-test',
-                selectionReasons: reasons,
-                affectedBlocks: affectedBlockNames,
+                pagePath: page.path, baseUrl, branchUrl, viewport: viewport.name,
+                status: 'unable-to-test', selectionReasons: reasons, affectedBlocks: affectedBlockNames,
                 summary: `Screenshot failed: ${baseShot?.error || branchShot?.error}`,
                 error: baseShot?.error || branchShot?.error,
               });
-              continue;
+              return;
             }
 
             // Visual diff
             const diffPath = join(compDir, `diff-${viewport.name}.png`);
-            const visual = compareVisuals(
-              baseShot.filePath,
-              branchShot.filePath,
-              diffPath,
-            );
+            const visual = compareVisuals(baseShot.filePath, branchShot.filePath, diffPath);
 
-            // Classify and push result
             const { status, summary } = classifyPageStatus(
               {
-                pagePath: page.path,
-                baseUrl,
-                branchUrl,
-                viewport: viewport.name,
-                selectionReasons: reasons,
-                affectedBlocks: affectedBlockNames,
+                pagePath: page.path, baseUrl, branchUrl, viewport: viewport.name,
+                selectionReasons: reasons, affectedBlocks: affectedBlockNames,
                 visual,
                 beforeScreenshot: baseShot.filePath,
                 afterScreenshot: branchShot.filePath,
@@ -310,15 +307,9 @@ async function run(): Promise<void> {
             );
 
             comparisons.push({
-              pagePath: page.path,
-              baseUrl,
-              branchUrl,
-              viewport: viewport.name,
-              status,
-              selectionReasons: reasons,
-              affectedBlocks: affectedBlockNames,
-              visual,
-              summary,
+              pagePath: page.path, baseUrl, branchUrl, viewport: viewport.name,
+              status, selectionReasons: reasons, affectedBlocks: affectedBlockNames,
+              visual, summary,
               beforeScreenshot: baseShot.filePath,
               afterScreenshot: branchShot.filePath,
               diffScreenshot: diffPath,
@@ -327,32 +318,22 @@ async function run(): Promise<void> {
             const msg = err instanceof Error ? err.message : String(err);
             core.warning(`Failed to compare ${page.path} @ ${viewport.name}: ${msg}`);
             comparisons.push({
-              pagePath: page.path,
-              baseUrl,
-              branchUrl,
-              viewport: viewport.name,
-              status: 'unable-to-test',
-              selectionReasons: reasons,
-              affectedBlocks: affectedBlockNames,
-              summary: `Comparison error: ${msg}`,
-              error: msg,
+              pagePath: page.path, baseUrl, branchUrl, viewport: viewport.name,
+              status: 'unable-to-test', selectionReasons: reasons, affectedBlocks: affectedBlockNames,
+              summary: `Comparison error: ${msg}`, error: msg,
             });
           }
         }
-      }
+      });
     } finally {
-      await browser.close();
+      await sharedBrowser.close();
     }
     core.endGroup();
 
     // ─── Step 6: Build and save report ────────────────────────────────────────
     core.startGroup('📝 Generating report');
     const report = buildRegressionReport({
-      runId,
-      baseRef,
-      headRef,
-      impact,
-      comparisons,
+      runId, baseRef, headRef, impact, comparisons,
       totalAffectedPages: selectionResult.totalAffected,
       skippedPages: selectionResult.skipped,
       mode,
@@ -361,18 +342,14 @@ async function run(): Promise<void> {
     });
 
     saveReports(report, outputDir);
-
     const markdown = generateMarkdownSummary(report);
     core.info(`Report status: ${report.status}`);
     core.endGroup();
 
     // ─── Step 7: Post to GitHub ───────────────────────────────────────────────
     core.startGroup('🐙 Posting to GitHub');
-
-    // Job summary
     await core.summary.addRaw(markdown).write();
 
-    // PR comment
     if (prNumber) {
       try {
         await upsertPrComment(octokit, owner, repo, prNumber, markdown);
@@ -382,7 +359,6 @@ async function run(): Promise<void> {
       }
     }
 
-    // Check run
     try {
       await upsertCheckRun(
         octokit, owner, repo, headSha,
@@ -395,7 +371,6 @@ async function run(): Promise<void> {
     } catch (err) {
       core.warning(`Failed to create check run: ${err instanceof Error ? err.message : String(err)}`);
     }
-
     core.endGroup();
 
     // ─── Step 8: Set outputs and exit ─────────────────────────────────────────
@@ -405,7 +380,6 @@ async function run(): Promise<void> {
     core.setOutput('report-path', outputDir);
     core.setOutput('run-id', runId);
 
-    // Fail the workflow only if explicitly requested and not in advisory mode
     if (!advisoryMode && failOnRegression && report.status === 'failed') {
       core.setFailed(`BlockGuard detected ${report.summary.failed} regression(s)`);
     } else if (report.status === 'failed') {
