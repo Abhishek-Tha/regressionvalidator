@@ -7,7 +7,7 @@
 'use strict';
 
 const { execSync } = require('child_process');
-const { existsSync } = require('fs');
+const { existsSync, writeFileSync } = require('fs');
 const { join } = require('path');
 
 const root = join(__dirname, '..');
@@ -24,6 +24,12 @@ try {
   execSync(
     `npx ncc build "${distEntry}" --out "${join(root, 'dist-bundled')}" --minify --no-source-map-register`,
     { stdio: 'inherit', cwd: root },
+  );
+  // ncc copies package.json with "type":"module" which breaks CJS execution.
+  // Overwrite it to force CommonJS.
+  writeFileSync(
+    join(root, 'dist-bundled', 'package.json'),
+    JSON.stringify({ type: 'commonjs' }, null, 2) + '\n',
   );
   console.log('Bundle written to dist-bundled/index.js');
 } catch (err) {
