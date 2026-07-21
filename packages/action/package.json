@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "BlockGuard GitHub Action — EDS block regression validation on PRs",
   "private": true,
-  "type": "module",
+  "type": "commonjs",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc --build && node scripts/bundle.js",
