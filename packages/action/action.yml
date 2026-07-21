@@ -80,5 +80,5 @@ outputs:
     description: 'BlockGuard run identifier'
 
 runs:
-  using: 'node20'
+  using: 'node24'
   main: 'dist-bundled/index.js'
