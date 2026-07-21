@@ -13,7 +13,8 @@ blockguard/
 ├── packages/
 │   ├── core/          @blockguard/core — deterministic engine
 │   ├── action/        blockguard-action — GitHub Action (composite)
-│   └── cli/           @blockguard/cli — local CLI
+│   ├── cli/           @blockguard/cli — local CLI
+│   └── mcp/           @blockguard/mcp — MCP server for AI assistant integration
 ├── examples/
 │   ├── blockguard.config.yml   — annotated config template
 │   └── consumer-workflow.yml   — copy this to your EDS repo
@@ -97,6 +98,247 @@ blockguard test cards --base main --head feature/cards
 
 # View the report
 blockguard report --format md
+```
+
+---
+
+### Option 3 — MCP Server (AI Assistant / Copilot integration)
+
+The `packages/mcp` package exposes BlockGuard as a local [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server. This lets you drive regression testing conversationally through any MCP-compatible AI assistant (ACS Copilot, Cline, Claude Dev, etc.) without leaving your editor.
+
+#### Build the MCP server
+
+```bash
+git clone https://github.com/Abhishek-Tha/regressionvalidator.git
+cd regressionvalidator
+npm install
+npm run build
+# Output: packages/mcp/dist/server.js
+```
+
+#### Register the server with your AI assistant
+
+Open your MCP settings file for your IDE:
+
+| IDE / Extension | Settings file |
+|-----------------|---------------|
+| ACS Copilot (VS Code) | `~/Library/Application Support/Code/User/globalStorage/acs-copilot-agent.acs-copilot-agent/settings/acs_copilot_mcp_settings.json` |
+| Cline / Claude Dev (VS Code) | `~/.cline/mcp_settings.json` |
+| Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+
+Add the `block-regression-validator` entry to `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "block-regression-validator": {
+      "command": "node",
+      "args": ["/absolute/path/to/regressionvalidator/packages/mcp/dist/server.js"],
+      "env": {
+        "LIVE_ORIGIN": "https://main--your-repo--your-org.aem.live",
+        "PREVIEW_ORIGIN": "https://branch--your-repo--your-org.aem.page",
+        "PROJECT_ROOT": "/absolute/path/to/your/eds-repo",
+        "GITHUB_TOKEN": "ghp_yourTokenHere",
+        "BLOCKGUARD_OWNER": "your-org",
+        "BLOCKGUARD_REPO": "your-eds-repo"
+      },
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}
+```
+
+> **All `env` values are optional defaults.** You can omit them entirely and pass the values inline in your prompts instead (see [Mode B](#mode-b--no-env-vars-pass-per-prompt) below). The `args` path must be absolute.
+
+#### Mode A — Pre-configured (recommended)
+
+Set the env vars once in MCP settings. Your prompts stay short:
+
+> *"Run a full regression test for the cards block"*  
+> *"Which pages use the hero block?"*  
+> *"Get the BlockGuard report for PR #42"*
+
+#### Mode B — No env vars (pass per prompt)
+
+Skip all `env` keys in MCP settings:
+
+```json
+{
+  "mcpServers": {
+    "block-regression-validator": {
+      "command": "node",
+      "args": ["/absolute/path/to/regressionvalidator/packages/mcp/dist/server.js"],
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}
+```
+
+Then include the details in your prompt:
+
+> *"Run a full regression test for the cards block on https://main--mysite--myorg.aem.live vs https://feature--mysite--myorg.aem.page in /Users/me/eds-repo"*
+
+---
+
+#### MCP Tools & Example Prompts
+
+All 8 tools are available once the server is registered. Tools that accept `liveOrigin`, `previewOrigin`, `projectRoot`, `githubToken`, `owner`, and `repo` fall back to the corresponding env vars if not passed explicitly.
+
+---
+
+##### `index_site_blocks`
+Discover all pages on an EDS site and build a block-usage index. Run this first before querying block usage.
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `baseUrl` | ✅ | Live site origin URL |
+| `pageSource` | | `query-index` (default) or `sitemap` |
+| `outputDir` | | Where to save the index (default: `/tmp/blockguard`) |
+| `refresh` | | Force re-index even if cached |
+
+**Example prompts:**
+```
+Index all blocks on https://main--mysite--myorg.aem.live
+Build a block usage index for my site using the sitemap
+Refresh the block index for https://main--mysite--myorg.aem.live
+```
+
+---
+
+##### `find_block_usage`
+Find all pages that use a specific EDS block, optionally filtered by variation or locale.
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `block` | ✅ | Block name (e.g. `cards`, `hero`) |
+| `variation` | | Filter by variation (e.g. `featured`) |
+| `locale` | | Filter by locale (e.g. `en-us`) |
+| `indexPath` | | Path to an existing `block-usage-index.json` |
+
+**Example prompts:**
+```
+Which pages use the hero block?
+Find all pages using the cards block with the featured variation
+Show me pages that use the columns block in the en-us locale
+```
+
+---
+
+##### `analyze_code_change`
+Analyse a git diff to determine which EDS blocks changed and whether the impact is block-scoped or site-wide.
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `baseRef` | | Git base ref (default: `origin/main`) |
+| `headRef` | | Git head ref (default: `HEAD`) |
+| `projectRoot` | | Absolute path to the EDS project repo (falls back to `PROJECT_ROOT` env var) |
+
+**Example prompts:**
+```
+Analyze what blocks changed in my current branch vs main
+What is the risk level of my current changes?
+Which blocks have been modified between origin/main and HEAD?
+```
+
+---
+
+##### `select_regression_pages`
+Given a list of changed block names, select the most representative pages for regression testing.
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `changedBlocks` | ✅ | Array of block names |
+| `mode` | | `representative` (default) or `full` |
+| `maxPages` | | Max pages to select (default: 20) |
+| `indexPath` | | Path to existing index |
+
+**Example prompts:**
+```
+Select the best pages to test for the cards and columns blocks
+Which pages should I regression test for the hero block? Use full mode
+Pick up to 5 representative pages for testing the navigation block
+```
+
+---
+
+##### `run_block_regression`
+Run a full regression test for a block: screenshot live + preview, pixel diff, DOM diff, accessibility, and runtime checks. This is the primary end-to-end tool.
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `block` | ✅ | Block name to test |
+| `liveOrigin` | ✅* | Live site origin URL (\*falls back to `LIVE_ORIGIN` env var) |
+| `previewOrigin` | ✅* | Branch preview origin URL (\*falls back to `PREVIEW_ORIGIN` env var) |
+| `projectRoot` | | EDS repo path (falls back to `PROJECT_ROOT` env var) |
+| `baseRef` | | Git base ref (default: `origin/main`) |
+| `headRef` | | Git head ref (default: `HEAD`) |
+| `mode` | | `representative` or `full` |
+| `viewports` | | Array of viewport names: `["mobile", "desktop"]` |
+| `outputDir` | | Output directory for screenshots and report |
+
+**Example prompts:**
+```
+Run a full regression test for the cards block
+Test the hero block at mobile viewport only
+Run regression on the columns block in full mode and save the report to /tmp/my-report
+```
+
+---
+
+##### `get_regression_report`
+Retrieve a previously generated local regression report by path.
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `reportPath` | | Path to `report.json` or report directory (default: `/tmp/blockguard-mcp`) |
+| `format` | | `summary` (default), `markdown`, or `full` |
+
+**Example prompts:**
+```
+Show me the last regression report
+Get the regression report as markdown
+Show the full JSON for the report at /tmp/my-report
+```
+
+---
+
+##### `get_pr_regression_report`
+Fetch the BlockGuard regression report for a GitHub Pull Request. Finds the BlockGuard check run, downloads the report artifact, and returns the results.
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `pr` | ✅ | Pull Request number |
+| `owner` | | GitHub org/user (falls back to `BLOCKGUARD_OWNER` env var) |
+| `repo` | | Repository name (falls back to `BLOCKGUARD_REPO` env var) |
+| `format` | | `markdown` (default), `summary`, or `full` |
+| `githubToken` | | GitHub PAT (falls back to `GITHUB_TOKEN` env var) |
+
+**Example prompts:**
+```
+Get the BlockGuard report for PR #42
+Show me the regression results for PR #15 as a summary
+What failed in the BlockGuard run for PR #7?
+```
+
+---
+
+##### `trigger_pr_regression`
+Trigger or re-trigger a BlockGuard regression run for a GitHub Pull Request. Re-runs the latest failed/cancelled run, or dispatches the workflow if no previous run exists.
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `pr` | ✅ | Pull Request number |
+| `owner` | | GitHub org/user (falls back to `BLOCKGUARD_OWNER` env var) |
+| `repo` | | Repository name (falls back to `BLOCKGUARD_REPO` env var) |
+| `githubToken` | | GitHub PAT (falls back to `GITHUB_TOKEN` env var) |
+
+**Example prompts:**
+```
+Re-run the BlockGuard regression on PR #42
+Trigger BlockGuard for PR #10
+Restart the failed regression test on PR #5
 ```
 
 ---

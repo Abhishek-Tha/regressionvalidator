@@ -40,6 +40,10 @@ export async function handleToolCall(name: string, args: ToolArgs): Promise<unkn
       return handleRunBlockRegression(args);
     case 'get_regression_report':
       return handleGetRegressionReport(args);
+    case 'get_pr_regression_report':
+      return handleGetPrRegressionReport(args);
+    case 'trigger_pr_regression':
+      return handleTriggerPrRegression(args);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -395,4 +399,393 @@ async function handleGetRegressionReport(args: ToolArgs): Promise<unknown> {
   }
 
   return report;
+}
+
+// ─── GitHub-aware handlers ────────────────────────────────────────────────────
+
+/**
+ * Resolve GitHub credentials + owner/repo from args or environment.
+ */
+function resolveGitHubContext(args: ToolArgs): {
+  token: string;
+  owner: string;
+  repo: string;
+} {
+  const token =
+    (String(args['githubToken'] ?? '') || process.env['GITHUB_TOKEN']) ?? '';
+  const owner =
+    (String(args['owner'] ?? '') || process.env['BLOCKGUARD_OWNER']) ?? '';
+  const repo =
+    (String(args['repo'] ?? '') || process.env['BLOCKGUARD_REPO']) ?? '';
+
+  if (!token) throw new Error('GitHub token is required. Pass githubToken or set GITHUB_TOKEN env var.');
+  if (!owner) throw new Error('GitHub owner is required. Pass owner or set BLOCKGUARD_OWNER env var.');
+  if (!repo) throw new Error('GitHub repo is required. Pass repo or set BLOCKGUARD_REPO env var.');
+
+  return { token, owner, repo };
+}
+
+/**
+ * Minimal GitHub REST helper — avoids pulling in @octokit/* as a runtime dep.
+ */
+async function ghFetch(
+  path: string,
+  token: string,
+  options: RequestInit = {},
+): Promise<Response> {
+  const url = path.startsWith('http') ? path : `https://api.github.com${path}`;
+  const res = await fetch(url, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      ...((options.headers as Record<string, string>) ?? {}),
+    },
+  });
+  return res;
+}
+
+/**
+ * Download a GitHub Actions artifact zip into memory and extract report.json.
+ * Returns the parsed JSON object or null if report.json is not in the zip.
+ */
+async function downloadArtifactReport(
+  downloadUrl: string,
+  token: string,
+): Promise<Record<string, unknown> | null> {
+  // GitHub redirects artifact downloads — follow with auth header
+  const res = await ghFetch(downloadUrl, token, { redirect: 'follow' });
+  if (!res.ok) throw new Error(`Artifact download failed: ${res.status} ${res.statusText}`);
+
+  const { createRequire } = await import('module');
+  const require = createRequire(import.meta.url);
+
+  // Use Node's built-in zlib + streams to unzip without extra deps
+  const arrayBuffer = await res.arrayBuffer();
+  const buffer = Buffer.from(arrayBuffer);
+
+  // Dynamically load adm-zip if available, otherwise try yauzl, else parse manually
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const AdmZip = require('adm-zip') as any;
+    const zip = new AdmZip(buffer);
+    const entry = zip
+      .getEntries()
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .find((e: any) => (e.entryName as string).endsWith('report.json'));
+    if (!entry) return null;
+    return JSON.parse(zip.readAsText(entry)) as Record<string, unknown>;
+  } catch {
+    // adm-zip not available — fall back: treat as raw JSON (some artifact setups)
+    try {
+      const text = buffer.toString('utf8');
+      return JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }
+}
+
+async function handleGetPrRegressionReport(args: ToolArgs): Promise<unknown> {
+  const prNumber = Number(args['pr']);
+  const format = String(args['format'] ?? 'markdown');
+
+  if (!prNumber || isNaN(prNumber)) throw new Error('pr (Pull Request number) is required');
+
+  const { token, owner, repo } = resolveGitHubContext(args);
+
+  // ── 1. Get PR head SHA ────────────────────────────────────────────────────
+  const prRes = await ghFetch(`/repos/${owner}/${repo}/pulls/${prNumber}`, token);
+  if (!prRes.ok) {
+    throw new Error(`Could not fetch PR #${prNumber}: ${prRes.status} ${prRes.statusText}`);
+  }
+  const pr = (await prRes.json()) as Record<string, unknown>;
+  const headSha = (pr['head'] as Record<string, unknown>)?.['sha'] as string;
+  if (!headSha) throw new Error(`Could not determine head SHA for PR #${prNumber}`);
+
+  // ── 2. Find the BlockGuard check run on this commit ───────────────────────
+  const checksRes = await ghFetch(
+    `/repos/${owner}/${repo}/commits/${headSha}/check-runs?per_page=100`,
+    token,
+  );
+  if (!checksRes.ok) throw new Error(`Could not fetch check runs: ${checksRes.status}`);
+
+  const checksData = (await checksRes.json()) as Record<string, unknown>;
+  const checkRuns = (checksData['check_runs'] as Record<string, unknown>[]) ?? [];
+
+  const blockguardCheck = checkRuns.find(
+    (c) =>
+      String(c['name'] ?? '')
+        .toLowerCase()
+        .includes('blockguard'),
+  );
+
+  if (!blockguardCheck) {
+    return {
+      pr: prNumber,
+      headSha,
+      status: 'not-found',
+      message: `No BlockGuard check run found on PR #${prNumber} (commit ${headSha.slice(0, 7)}). ` +
+        `The BlockGuard workflow may not have run yet. Use trigger_pr_regression to start it.`,
+      allChecks: checkRuns.map((c) => c['name']),
+    };
+  }
+
+  const checkStatus = String(blockguardCheck['status'] ?? '');
+  const checkConclusion = blockguardCheck['conclusion'] ? String(blockguardCheck['conclusion']) : null;
+
+  if (checkStatus !== 'completed') {
+    return {
+      pr: prNumber,
+      headSha,
+      checkName: blockguardCheck['name'],
+      status: 'in-progress',
+      checkStatus,
+      message: `BlockGuard is still running on PR #${prNumber}. Check back shortly.`,
+    };
+  }
+
+  // ── 3. Find the Actions workflow run that created this check ──────────────
+  // The check run's details_url points to the run: .../actions/runs/{run_id}
+  const detailsUrl = String(blockguardCheck['details_url'] ?? '');
+  const runIdMatch = detailsUrl.match(/\/runs\/(\d+)/);
+  if (!runIdMatch) {
+    return {
+      pr: prNumber,
+      checkConclusion,
+      checkName: blockguardCheck['name'],
+      status: checkConclusion ?? 'unknown',
+      message: `BlockGuard check completed (${checkConclusion}) but could not resolve workflow run ID from: ${detailsUrl}`,
+    };
+  }
+  const workflowRunId = runIdMatch[1];
+
+  // ── 4. List artifacts for the workflow run ────────────────────────────────
+  const artifactsRes = await ghFetch(
+    `/repos/${owner}/${repo}/actions/runs/${workflowRunId}/artifacts`,
+    token,
+  );
+  if (!artifactsRes.ok) {
+    throw new Error(`Could not fetch artifacts: ${artifactsRes.status}`);
+  }
+
+  const artifactsData = (await artifactsRes.json()) as Record<string, unknown>;
+  const artifacts = (artifactsData['artifacts'] as Record<string, unknown>[]) ?? [];
+
+  const reportArtifact = artifacts.find(
+    (a) =>
+      String(a['name'] ?? '')
+        .toLowerCase()
+        .includes('blockguard'),
+  );
+
+  if (!reportArtifact) {
+    // No artifact — report conclusion only
+    return {
+      pr: prNumber,
+      workflowRunId,
+      checkConclusion,
+      status: checkConclusion ?? 'unknown',
+      message:
+        `BlockGuard check ran (conclusion: ${checkConclusion}) but no report artifact was found ` +
+        `in workflow run ${workflowRunId}. ` +
+        `Make sure the action.yml includes an upload-artifact step for the blockguard-report.`,
+      availableArtifacts: artifacts.map((a) => a['name']),
+    };
+  }
+
+  // ── 5. Download and parse report.json from the artifact zip ───────────────
+  const downloadUrl = String(reportArtifact['archive_download_url'] ?? '');
+  let report: Record<string, unknown> | null = null;
+
+  try {
+    report = await downloadArtifactReport(downloadUrl, token);
+  } catch (err) {
+    return {
+      pr: prNumber,
+      workflowRunId,
+      checkConclusion,
+      artifactName: reportArtifact['name'],
+      status: checkConclusion ?? 'unknown',
+      message: `Downloaded artifact but failed to parse report.json: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  if (!report) {
+    return {
+      pr: prNumber,
+      workflowRunId,
+      status: checkConclusion ?? 'unknown',
+      message: 'report.json not found inside the artifact zip.',
+    };
+  }
+
+  // ── 6. Format and return ──────────────────────────────────────────────────
+  const comparisons = (report['comparisons'] as PageComparisonResult[]) ?? [];
+
+  if (format === 'markdown') {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return { markdown: generateMarkdownSummary(report as unknown as any) };
+  }
+
+  if (format === 'summary') {
+    return {
+      pr: prNumber,
+      workflowRunId,
+      runId: report['runId'],
+      status: report['status'],
+      checkConclusion,
+      summary: report['summary'],
+      testedPages: report['testedPages'],
+      totalAffectedPages: report['totalAffectedPages'],
+      changedBlocks: (report['impact'] as Record<string, unknown>)?.['allAffectedBlocks'] ?? [],
+      failures: comparisons
+        .filter((c) => c.status === 'failed')
+        .map((c) => ({ page: c.pagePath, viewport: c.viewport, issue: c.summary })),
+      warnings: comparisons
+        .filter((c) => c.status === 'warning')
+        .map((c) => ({ page: c.pagePath, viewport: c.viewport, issue: c.summary })),
+    };
+  }
+
+  // format === 'full'
+  return { pr: prNumber, workflowRunId, checkConclusion, ...report };
+}
+
+async function handleTriggerPrRegression(args: ToolArgs): Promise<unknown> {
+  const prNumber = Number(args['pr']);
+  if (!prNumber || isNaN(prNumber)) throw new Error('pr (Pull Request number) is required');
+
+  const { token, owner, repo } = resolveGitHubContext(args);
+
+  // ── 1. Get PR details ─────────────────────────────────────────────────────
+  const prRes = await ghFetch(`/repos/${owner}/${repo}/pulls/${prNumber}`, token);
+  if (!prRes.ok) throw new Error(`Could not fetch PR #${prNumber}: ${prRes.status}`);
+
+  const pr = (await prRes.json()) as Record<string, unknown>;
+  const headSha = (pr['head'] as Record<string, unknown>)?.['sha'] as string;
+  const headBranch = (pr['head'] as Record<string, unknown>)?.['ref'] as string;
+
+  // ── 2. Find existing workflow runs for this commit ────────────────────────
+  const runsRes = await ghFetch(
+    `/repos/${owner}/${repo}/actions/runs?head_sha=${headSha}&per_page=50`,
+    token,
+  );
+  if (!runsRes.ok) throw new Error(`Could not fetch workflow runs: ${runsRes.status}`);
+
+  const runsData = (await runsRes.json()) as Record<string, unknown>;
+  const runs = (runsData['workflow_runs'] as Record<string, unknown>[]) ?? [];
+
+  // Find any BlockGuard workflow run
+  const blockguardRun = runs.find(
+    (r) =>
+      String(r['name'] ?? '')
+        .toLowerCase()
+        .includes('blockguard') ||
+      String(r['path'] ?? '')
+        .toLowerCase()
+        .includes('blockguard'),
+  );
+
+  // ── 3a. Re-run existing failed/cancelled run ──────────────────────────────
+  if (blockguardRun) {
+    const runStatus = String(blockguardRun['status'] ?? '');
+    const runConclusion = blockguardRun['conclusion'] ? String(blockguardRun['conclusion']) : null;
+    const runId = String(blockguardRun['id'] ?? '');
+
+    if (runStatus === 'in_progress' || runStatus === 'queued') {
+      return {
+        pr: prNumber,
+        status: 'already-running',
+        workflowRunId: runId,
+        message: `BlockGuard is already running for PR #${prNumber} (run ${runId}, status: ${runStatus}). No action taken.`,
+        runsUrl: blockguardRun['html_url'],
+      };
+    }
+
+    // Re-run all failed jobs
+    const rerunRes = await ghFetch(
+      `/repos/${owner}/${repo}/actions/runs/${runId}/rerun-failed-jobs`,
+      token,
+      { method: 'POST', body: JSON.stringify({ enable_debug_logging: false }) },
+    );
+
+    if (rerunRes.ok || rerunRes.status === 201) {
+      return {
+        pr: prNumber,
+        status: 'retriggered',
+        workflowRunId: runId,
+        previousConclusion: runConclusion,
+        message: `BlockGuard re-triggered for PR #${prNumber} (re-running failed jobs of run ${runId}).`,
+        runsUrl: blockguardRun['html_url'],
+      };
+    }
+
+    const errText = await rerunRes.text();
+    return {
+      pr: prNumber,
+      status: 'retrigger-failed',
+      workflowRunId: runId,
+      message: `Could not re-run workflow run ${runId}: ${rerunRes.status} — ${errText}`,
+    };
+  }
+
+  // ── 3b. No existing run — try workflow_dispatch ───────────────────────────
+  // Find a workflow file that contains "blockguard" in its name
+  const workflowsRes = await ghFetch(`/repos/${owner}/${repo}/actions/workflows`, token);
+  if (!workflowsRes.ok) throw new Error(`Could not list workflows: ${workflowsRes.status}`);
+
+  const workflowsData = (await workflowsRes.json()) as Record<string, unknown>;
+  const workflows = (workflowsData['workflows'] as Record<string, unknown>[]) ?? [];
+
+  const bgWorkflow = workflows.find(
+    (w) =>
+      String(w['name'] ?? '')
+        .toLowerCase()
+        .includes('blockguard') ||
+      String(w['path'] ?? '')
+        .toLowerCase()
+        .includes('blockguard'),
+  );
+
+  if (!bgWorkflow) {
+    return {
+      pr: prNumber,
+      status: 'no-workflow',
+      message:
+        `No BlockGuard workflow run found for PR #${prNumber} (commit ${headSha.slice(0, 7)}) ` +
+        `and no BlockGuard workflow file found in this repo. ` +
+        `Available workflows: ${workflows.map((w) => w['name']).join(', ')}`,
+    };
+  }
+
+  const workflowId = String(bgWorkflow['id'] ?? '');
+  const dispatchRes = await ghFetch(
+    `/repos/${owner}/${repo}/actions/workflows/${workflowId}/dispatches`,
+    token,
+    {
+      method: 'POST',
+      body: JSON.stringify({ ref: headBranch }),
+    },
+  );
+
+  if (dispatchRes.ok || dispatchRes.status === 204) {
+    return {
+      pr: prNumber,
+      headBranch,
+      workflowId,
+      status: 'dispatched',
+      message:
+        `BlockGuard workflow dispatched on branch '${headBranch}' for PR #${prNumber}. ` +
+        `It may take a few seconds to appear in the Actions tab.`,
+    };
+  }
+
+  const dispatchErr = await dispatchRes.text();
+  return {
+    pr: prNumber,
+    status: 'dispatch-failed',
+    message: `workflow_dispatch failed: ${dispatchRes.status} — ${dispatchErr}`,
+  };
 }

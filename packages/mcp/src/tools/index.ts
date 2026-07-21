@@ -180,4 +180,71 @@ export const toolDefinitions = [
       },
     },
   },
+  {
+    name: 'get_pr_regression_report',
+    description:
+      'Fetch the BlockGuard regression report for a GitHub Pull Request number. ' +
+      'Finds the BlockGuard check run attached to the PR, downloads the report artifact, ' +
+      'and returns the results as summary, markdown, or full JSON. ' +
+      'Reads GITHUB_TOKEN, BLOCKGUARD_OWNER, and BLOCKGUARD_REPO from environment if not provided.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pr: {
+          type: 'number',
+          description: 'Pull Request number (e.g. 42)',
+        },
+        owner: {
+          type: 'string',
+          description:
+            'GitHub org or user name (e.g. "Abhishek-Tha"). Falls back to BLOCKGUARD_OWNER env var.',
+        },
+        repo: {
+          type: 'string',
+          description:
+            'GitHub repository name (e.g. "regressionvalidator"). Falls back to BLOCKGUARD_REPO env var.',
+        },
+        format: {
+          type: 'string',
+          enum: ['summary', 'full', 'markdown'],
+          description: 'Output format (default: markdown)',
+        },
+        githubToken: {
+          type: 'string',
+          description: 'GitHub Personal Access Token. Falls back to GITHUB_TOKEN env var.',
+        },
+      },
+      required: ['pr'],
+    },
+  },
+  {
+    name: 'trigger_pr_regression',
+    description:
+      'Trigger a new BlockGuard regression run for a GitHub Pull Request. ' +
+      'Re-runs the latest failed or cancelled BlockGuard workflow run for the PR, ' +
+      'or dispatches the workflow if no previous run exists. ' +
+      'Reads GITHUB_TOKEN, BLOCKGUARD_OWNER, and BLOCKGUARD_REPO from environment if not provided.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pr: {
+          type: 'number',
+          description: 'Pull Request number (e.g. 42)',
+        },
+        owner: {
+          type: 'string',
+          description: 'GitHub org or user name. Falls back to BLOCKGUARD_OWNER env var.',
+        },
+        repo: {
+          type: 'string',
+          description: 'GitHub repository name. Falls back to BLOCKGUARD_REPO env var.',
+        },
+        githubToken: {
+          type: 'string',
+          description: 'GitHub Personal Access Token. Falls back to GITHUB_TOKEN env var.',
+        },
+      },
+      required: ['pr'],
+    },
+  },
 ];
