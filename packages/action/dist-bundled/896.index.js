@@ -1,6 +1,7 @@
-export const id = 896;
-export const ids = [896];
-export const modules = {
+"use strict";
+exports.id = 896;
+exports.ids = [896];
+exports.modules = {
 
 /***/ 33896:
 /***/ ((__unused_webpack___webpack_module__, __webpack_exports__, __webpack_require__) => {
@@ -52,3 +53,4 @@ class BrowserWebSocketTransport {
 /***/ })
 
 };
+;
