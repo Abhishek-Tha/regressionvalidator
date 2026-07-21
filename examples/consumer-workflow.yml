@@ -47,28 +47,8 @@ jobs:
         with:
           node-version: '20'
 
-      # Install Chrome for Puppeteer
-      - name: Install Puppeteer dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libnss3 \
-            libatk1.0-0t64 \
-            libatk-bridge2.0-0t64 \
-            libcups2t64 \
-            libxcomposite1 \
-            libxdamage1 \
-            libxrandr2 \
-            libgbm1 \
-            libxkbcommon0 \
-            libpango-1.0-0 \
-            libcairo2 \
-            libasound2t64
-
-      - name: Install Chrome via Puppeteer
-        run: npx puppeteer browsers install chrome
-        env:
-          PUPPETEER_CACHE_DIR: /home/runner/.cache/puppeteer
+      # Chrome is installed automatically by the BlockGuard action itself.
+      # No manual Puppeteer install step needed here.
 
       - name: Run BlockGuard regression
         id: blockguard

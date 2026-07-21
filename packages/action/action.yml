@@ -80,5 +80,58 @@ outputs:
     description: 'BlockGuard run identifier'
 
 runs:
-  using: 'node24'
-  main: 'dist-bundled/index.js'
+  using: 'composite'
+  steps:
+    # ── Install system-level Puppeteer dependencies (Ubuntu / GitHub-hosted runners) ──
+    - name: Install Puppeteer system dependencies
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq \
+          libnss3 \
+          libatk1.0-0t64 \
+          libatk-bridge2.0-0t64 \
+          libcups2t64 \
+          libxcomposite1 \
+          libxdamage1 \
+          libxrandr2 \
+          libgbm1 \
+          libxkbcommon0 \
+          libpango-1.0-0 \
+          libcairo2 \
+          libasound2t64 \
+          libx11-xcb1 \
+          libxcb-dri3-0 \
+          libdrm2
+
+    # ── Download Chrome into the runner cache ──────────────────────────────────
+    - name: Install Chrome for Puppeteer
+      shell: bash
+      env:
+        PUPPETEER_CACHE_DIR: /home/runner/.cache/puppeteer
+      run: npx puppeteer browsers install chrome
+
+    # ── Run the bundled action ─────────────────────────────────────────────────
+    - name: Run BlockGuard
+      shell: bash
+      env:
+        PUPPETEER_CACHE_DIR: /home/runner/.cache/puppeteer
+        INPUT_OWNER: ${{ inputs.owner }}
+        INPUT_REPO: ${{ inputs.repo }}
+        INPUT_BASE-BRANCH: ${{ inputs.base-branch }}
+        INPUT_BASE-REF: ${{ inputs.base-ref }}
+        INPUT_HEAD-REF: ${{ inputs.head-ref }}
+        INPUT_SITE-MAP-URL: ${{ inputs.site-map-url }}
+        INPUT_PAGE-INDEX-URL: ${{ inputs.page-index-url }}
+        INPUT_LIVE-ORIGIN: ${{ inputs.live-origin }}
+        INPUT_PREVIEW-ORIGIN: ${{ inputs.preview-origin }}
+        INPUT_CONFIG: ${{ inputs.config }}
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_MAX-PAGES: ${{ inputs.max-pages }}
+        INPUT_VIEWPORT-WIDTH: ${{ inputs.viewport-width }}
+        INPUT_FAIL-ON-REGRESSION: ${{ inputs.fail-on-regression }}
+        INPUT_ADVISORY-MODE: ${{ inputs.advisory-mode }}
+        INPUT_OUTPUT-DIR: ${{ inputs.output-dir }}
+        INPUT_GITHUB-TOKEN: ${{ inputs.github-token }}
+      run: node "${{ github.action_path }}/dist-bundled/index.js"
