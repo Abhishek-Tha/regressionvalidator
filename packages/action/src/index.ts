@@ -337,14 +337,20 @@ async function run(): Promise<void> {
                   captureDir: join(compDir, `${blockName}_${v}`),
                 });
               }
-              // Also capture the base block (without any variation class) in case
-              // there is a default instance alongside the variation instances.
-              blockCapturePlan.push({
-                key: blockName,
-                blockName,
-                selector: `.${blockName}`,
-                captureDir: join(compDir, blockName),
-              });
+              // Only add a bare "blockName" entry when the page has more instances
+              // than it has named variations — meaning at least one instance has no
+              // variation class at all (a default/unstyled instance alongside the
+              // named ones).  Without this guard, `.blockName` matches the variation
+              // instances too and every block section is rendered twice.
+              const instances = pageBlock?.instances ?? 0;
+              if (instances > pageVariations.length) {
+                blockCapturePlan.push({
+                  key: blockName,
+                  blockName,
+                  selector: `.${blockName}`,
+                  captureDir: join(compDir, blockName),
+                });
+              }
             } else {
               // No variations — single capture for the whole block
               blockCapturePlan.push({
