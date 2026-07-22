@@ -54,22 +54,61 @@ export function generateHtmlReport(report: RegressionReport, outputDir: string):
 // ─── Block label helper ───────────────────────────────────────────────────────
 
 /**
- * Format a block name with its affected variation(s) for display.
- * e.g. "cards" + ["body-highlight"] → "cards (body-highlight)"
- *      "columns" + []               → "columns"
+ * Format a block key for display.
+ *
+ * The capture pipeline now emits composite keys directly into `affectedBlocks`
+ * and `blockScreenshots`, e.g.:
+ *   "cards (body-highlight)"  — named variation
+ *   "cards"                   — default (no variation suffix)
+ *   "columns (stack-view)"    — named variation
+ *
+ * If the key already contains a parenthesised variation (i.e. it was set by the
+ * new per-variation capture plan) we return it unchanged.
+ *
+ * For older/legacy data where the key is just a bare block name and variation
+ * info must be inferred, we fall back to:
+ *   1. `affectedVariations[blockName]` — variation-scoped CSS diff
+ *   2. `selectionReasons` entries of the form "covers-variation:{block}:{variation}"
+ *   3. Bare block name (default / no variation)
  */
 function blockLabel(
   blockName: string,
   comparisons: PageComparisonResult[],
 ): string {
-  // Collect all variation sets for this block across all viewport comparisons
+  // Key already encodes the variation — return as-is
+  if (blockName.includes(' (')) return blockName;
+
+  // 1. Explicit affectedVariations (variation-scoped changes)
   const varSet = new Set<string>();
   for (const c of comparisons) {
     const vars = c.affectedVariations?.[blockName] ?? [];
-    for (const v of vars) varSet.add(v);
+    for (const v of vars) {
+      if (v && v !== 'default') varSet.add(v);
+    }
   }
-  if (varSet.size === 0) return blockName;
-  return `${blockName} (${Array.from(varSet).join(', ')})`;
+  if (varSet.size > 0) {
+    return `${blockName} (${Array.from(varSet).join(', ')})`;
+  }
+
+  // 2. Derive from selectionReasons: "covers-variation:{blockName}:{variation}"
+  const reasonVarSet = new Set<string>();
+  for (const c of comparisons) {
+    for (const reason of c.selectionReasons ?? []) {
+      const prefix = `covers-variation:${blockName}:`;
+      if (reason.startsWith(prefix)) {
+        const variation = reason.slice(prefix.length);
+        if (variation && variation !== 'default') {
+          reasonVarSet.add(variation);
+        }
+      }
+    }
+  }
+  if (reasonVarSet.size > 0) {
+    return `${blockName} (${Array.from(reasonVarSet).join(', ')})`;
+  }
+
+  // 3. No specific variation — show just the block name
+  return blockName;
 }
 
 // ─── Group comparisons by pagePath ───────────────────────────────────────────

@@ -95,16 +95,15 @@ async function run(): Promise<void> {
           },
           capture: {
             disableAnimations: true,
-            waitForFonts: false,        // ← skip font wait for speed
-            waitForImages: false,       // ← skip image wait for speed
+            waitForFonts: false,
+            waitForImages: false,
             maskSelectors: ['.timestamp', '.personalized-content'],
             hideSelectors: ['.cookie-banner'],
             waitForSelectors: ['main .block'],
-            delayMs: 200,              // ← reduced from 500ms
+            delayMs: 200,
             timezone: 'UTC',
             locale: 'en-US',
           },
-          // ← desktop only by default; add mobile in blockguard.config.yml if needed
           viewports: [
             { name: 'desktop', width: 1440, height: 900 },
           ],
@@ -167,7 +166,6 @@ async function run(): Promise<void> {
       core.warning(`Page discovery failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    // Parallel HEAD-check — only keep pages published on live origin
     core.info(`Discovered ${pages.length} pages — verifying each exists on live origin...`);
     const publishedPages: typeof pages = [];
     await Promise.all(
@@ -183,15 +181,11 @@ async function run(): Promise<void> {
     core.info(`${pages.length} published pages on live origin`);
     core.endGroup();
 
-    // ─── Step 3b: Scan pages for block usage (parallel, concurrency=3) ────────
-    // Scan BOTH live and preview origins and merge block usage.
-    // This ensures blocks that are new/moved on the branch (but not yet on live)
-    // are still included in the affected-page set and captured correctly.
+    // ─── Step 3b: Scan pages for block usage ──────────────────────────────────
     core.startGroup('🔎 Scanning pages for block usage');
     const configHash = hashConfig(config);
     let index = createEmptyIndex(`${owner}/${repo}`, headRef, configHash);
 
-    // Launch ONE browser, reused across scan + capture phases
     const sharedBrowser = await launchBrowser();
     const indexedPages: Awaited<ReturnType<typeof scanPage>>[] = [];
 
@@ -201,50 +195,31 @@ async function run(): Promise<void> {
         const previewUrl = `${previewOrigin}${p.path}`;
         core.info(`  Scanning ${p.path}...`);
         try {
-          // Scan the live page
           const scannedLive = await scanPage(
-            sharedBrowser,
-            liveUrl,
-            p.path,
-            `${owner}/${repo}`,
-            'en',
-            config.blockDetection,
+            sharedBrowser, liveUrl, p.path, `${owner}/${repo}`, 'en', config.blockDetection,
           );
 
-          // Also scan the preview page and merge any additional blocks it exposes.
-          // This catches blocks that are new on the branch but absent on live.
           let merged = scannedLive;
           if (previewReady) {
             try {
               const scannedPreview = await scanPage(
-                sharedBrowser,
-                previewUrl,
-                p.path,
-                `${owner}/${repo}`,
-                'en',
-                config.blockDetection,
+                sharedBrowser, previewUrl, p.path, `${owner}/${repo}`, 'en', config.blockDetection,
               );
-              // Merge: start with live blocks, then add any block from preview not in live
               const mergedBlocks = [...scannedLive.blocks];
               for (const previewBlock of scannedPreview.blocks) {
                 const existing = mergedBlocks.find((b) => b.name === previewBlock.name);
                 if (!existing) {
-                  // Block only exists on branch — include it so it gets captured
                   mergedBlocks.push(previewBlock);
                   core.info(`    Branch-only block detected: ${previewBlock.name} on ${p.path}`);
                 } else {
-                  // Block exists on both — merge any additional variations from preview
                   for (const v of previewBlock.variations) {
-                    if (!existing.variations.includes(v)) {
-                      existing.variations.push(v);
-                    }
+                    if (!existing.variations.includes(v)) existing.variations.push(v);
                   }
                 }
               }
               merged = { ...scannedLive, blocks: mergedBlocks };
             } catch (previewErr) {
               core.debug(`  Preview scan failed for ${p.path}: ${previewErr instanceof Error ? previewErr.message : String(previewErr)}`);
-              // Non-fatal — fall back to live scan results only
             }
           }
 
@@ -255,7 +230,6 @@ async function run(): Promise<void> {
         }
       });
 
-      // Filter to pages that use a changed block (from either live or branch)
       const affectedSet = new Set(impact.allAffectedBlocks.map((b) => b.toLowerCase()));
       const relevantPages = indexedPages.filter((p) =>
         p.blocks.some((b) => affectedSet.has(b.name.toLowerCase())),
@@ -274,7 +248,6 @@ async function run(): Promise<void> {
     // ─── Step 4: Select pages ─────────────────────────────────────────────────
     core.startGroup('📋 Selecting test pages');
 
-    // Log detected variations to aid debugging
     for (const [block, vars] of Object.entries(impact.allAffectedVariations)) {
       if (vars.length > 0) {
         core.info(`  Block '${block}' — only variation(s) changed: ${vars.join(', ')}`);
@@ -292,13 +265,12 @@ async function run(): Promise<void> {
     core.info(`Selected ${selectionResult.selected.length} / ${selectionResult.totalAffected} pages`);
     core.endGroup();
 
-    // ─── Step 5: Capture & compare (parallel pages, concurrency=3) ────────────
+    // ─── Step 5: Capture & compare ────────────────────────────────────────────
     core.startGroup('📸 Capturing screenshots and comparing');
     const comparisons: PageComparisonResult[] = [];
     const runId = `bg-${Date.now()}`;
 
     try {
-      // Check preview existence for each unique page path upfront (parallel)
       const previewExistsMap = new Map<string, boolean>();
       if (previewReady) {
         await Promise.all(
@@ -309,7 +281,6 @@ async function run(): Promise<void> {
         );
       }
 
-      // Process pages concurrently (3 at a time) with viewports sequential per page
       await withConcurrency(selectionResult.selected, 3, async ({ page, reasons, affectedBlockNames, affectedVariations }) => {
         const baseUrl = `${liveOrigin}${page.path}`;
         const branchUrl = `${previewOrigin}${page.path}`;
@@ -323,43 +294,95 @@ async function run(): Promise<void> {
           core.info(`  Testing ${page.path} @ ${viewport.name}`);
           const compDir = join(outputDir, 'comparisons', page.path.replace(/\//g, '_'), viewport.name);
 
-          // Per-block cropped screenshots: blockName → { before, after, diff }
-          const blockScreenshots: Record<string, { before?: string; after?: string; diff?: string }> = {};
+          // ── Per-variation capture plan ────────────────────────────────────
+          // Key = "blockName" for default variation, "blockName (variation)" for named ones.
+          // When the whole block changed (changedVars=[]) AND the page has multiple
+          // distinct variations, we create one capture per variation so each appears
+          // as its own section in the report instead of a single merged entry.
+          type BlockCapture = {
+            key: string;        // report label / blockScreenshots key
+            blockName: string;
+            selector: string;   // CSS selector to clip
+            captureDir: string; // output sub-directory
+          };
 
-          // Track worst visual diff across all blocks for the overall page status
+          const blockCapturePlan: BlockCapture[] = [];
+
+          for (const blockName of affectedBlockNames) {
+            const changedVars = affectedVariations[blockName] ?? [];
+            const pageBlock = page.blocks.find((b) => b.name === blockName);
+            const pageVariations = pageBlock?.variations ?? [];
+
+            if (changedVars.length > 0) {
+              // Variation-scoped change — one entry per changed variation
+              for (const v of changedVars) {
+                const key = `${blockName} (${v})`;
+                blockCapturePlan.push({
+                  key,
+                  blockName,
+                  selector: `.${blockName}.${v}`,
+                  captureDir: join(compDir, `${blockName}_${v}`),
+                });
+              }
+            } else if (pageVariations.length > 0) {
+              // Whole block changed — create one capture entry per distinct variation
+              // present on this page so each variation gets its own report section.
+              for (const v of pageVariations) {
+                const key = `${blockName} (${v})`;
+                blockCapturePlan.push({
+                  key,
+                  blockName,
+                  selector: `.${blockName}.${v}`,
+                  captureDir: join(compDir, `${blockName}_${v}`),
+                });
+              }
+              // Also capture the base block (without any variation class) in case
+              // there is a default instance alongside the variation instances.
+              blockCapturePlan.push({
+                key: blockName,
+                blockName,
+                selector: `.${blockName}`,
+                captureDir: join(compDir, blockName),
+              });
+            } else {
+              // No variations — single capture for the whole block
+              blockCapturePlan.push({
+                key: blockName,
+                blockName,
+                selector: `.${blockName}`,
+                captureDir: join(compDir, blockName),
+              });
+            }
+          }
+
+          // ── Execute captures ──────────────────────────────────────────────
+          const blockScreenshots: Record<string, { before?: string; after?: string; diff?: string }> = {};
           let worstVisual: import('@blockguard/core').VisualDiffResult | undefined;
           let anyCaptureFailed = false;
           let captureError: string | undefined;
 
           try {
-            for (const blockName of affectedBlockNames) {
-              const changedVars = affectedVariations[blockName] ?? [];
-              // Build selector for this specific block
-              const blockSelector = changedVars.length > 0
-                ? changedVars.map((v) => `.${blockName}.${v}`).join(', ')
-                : `.${blockName}`;
-
-              const blockCompDir = join(compDir, blockName);
-              core.info(`    Clip block '${blockName}' selector: ${blockSelector}`);
+            for (const capture of blockCapturePlan) {
+              core.info(`    Clip '${capture.key}' selector: ${capture.selector}`);
 
               let [baseShot, branchShot] = await Promise.all([
                 captureBlockClip({
                   browser: sharedBrowser, url: baseUrl, label: 'before',
-                  viewport, outputDir: blockCompDir, captureConfig: config.capture,
-                  blockSelector,
+                  viewport, outputDir: capture.captureDir, captureConfig: config.capture,
+                  blockSelector: capture.selector,
                 }),
                 captureBlockClip({
                   browser: sharedBrowser, url: branchUrl, label: 'after',
-                  viewport, outputDir: blockCompDir, captureConfig: config.capture,
-                  blockSelector,
+                  viewport, outputDir: capture.captureDir, captureConfig: config.capture,
+                  blockSelector: capture.selector,
                 }),
               ]);
 
               if (!baseShot.blockFound) {
-                core.info(`      '${blockName}' not found on live — used full-page fallback`);
+                core.info(`      '${capture.key}' not found on live — used full-page fallback`);
               }
               if (!branchShot.blockFound && branchShot.success) {
-                core.warning(`      '${blockName}' missing on preview branch (${page.path}) — possible regression`);
+                core.warning(`      '${capture.key}' missing on preview branch (${page.path}) — possible regression`);
               }
 
               if (!baseShot.success || !branchShot.success) {
@@ -368,23 +391,20 @@ async function run(): Promise<void> {
                 continue;
               }
 
-              // If one side found the block element (clip) but the other fell back to
-              // full-page, the two images have wildly different dimensions and a
-              // pixel-diff would produce a meaningless near-100% mismatch.
-              // Re-capture the clipped side as full-page to get a fair comparison.
+              // If one side clipped but the other fell back to full-page, re-capture
+              // both as full-page so dimensions match for a fair pixel diff.
               if (baseShot.blockFound !== branchShot.blockFound) {
-                core.info(`      '${blockName}' block-found mismatch (base=${baseShot.blockFound}, branch=${branchShot.blockFound}) — re-capturing both as full-page`);
-                const fullPageSelector = 'body'; // full-page sentinel
+                core.info(`      '${capture.key}' block-found mismatch — re-capturing both as full-page`);
                 const [baseFull, branchFull] = await Promise.all([
                   captureBlockClip({
                     browser: sharedBrowser, url: baseUrl, label: 'before-full',
-                    viewport, outputDir: blockCompDir, captureConfig: config.capture,
-                    blockSelector: fullPageSelector,
+                    viewport, outputDir: capture.captureDir, captureConfig: config.capture,
+                    blockSelector: 'body',
                   }),
                   captureBlockClip({
                     browser: sharedBrowser, url: branchUrl, label: 'after-full',
-                    viewport, outputDir: blockCompDir, captureConfig: config.capture,
-                    blockSelector: fullPageSelector,
+                    viewport, outputDir: capture.captureDir, captureConfig: config.capture,
+                    blockSelector: 'body',
                   }),
                 ]);
                 if (baseFull.success && branchFull.success) {
@@ -393,25 +413,30 @@ async function run(): Promise<void> {
                 }
               }
 
-              const diffPath = join(blockCompDir, `diff-${viewport.name}.png`);
+              const diffPath = join(capture.captureDir, `diff-${viewport.name}.png`);
               const visual = compareVisuals(baseShot.filePath, branchShot.filePath, diffPath);
 
-              blockScreenshots[blockName] = {
+              blockScreenshots[capture.key] = {
                 before: baseShot.filePath,
                 after: branchShot.filePath,
                 diff: diffPath,
               };
 
-              // Keep track of the worst diff to drive the overall page status
               if (!worstVisual || visual.mismatchPercent > (worstVisual.mismatchPercent ?? 0)) {
                 worstVisual = visual;
               }
             }
 
+            // Build the flat list of affected block keys for this comparison entry
+            const capturedKeys = Object.keys(blockScreenshots);
+            const reportAffectedBlocks = capturedKeys.length > 0 ? capturedKeys : affectedBlockNames;
+            const firstKey = reportAffectedBlocks[0];
+
             if (anyCaptureFailed && !worstVisual) {
               comparisons.push({
                 pagePath: page.path, baseUrl, branchUrl, viewport: viewport.name,
-                status: 'unable-to-test', selectionReasons: reasons, affectedBlocks: affectedBlockNames,
+                status: 'unable-to-test', selectionReasons: reasons,
+                affectedBlocks: reportAffectedBlocks,
                 affectedVariations,
                 summary: `Screenshot failed: ${captureError}`,
                 error: captureError,
@@ -420,28 +445,29 @@ async function run(): Promise<void> {
               return;
             }
 
-            // Use worst-block visual diff for overall page classification
             const { status, summary } = classifyPageStatus(
               {
                 pagePath: page.path, baseUrl, branchUrl, viewport: viewport.name,
-                selectionReasons: reasons, affectedBlocks: affectedBlockNames,
+                selectionReasons: reasons,
+                affectedBlocks: reportAffectedBlocks,
                 affectedVariations,
                 visual: worstVisual,
-                beforeScreenshot: blockScreenshots[affectedBlockNames[0]]?.before,
-                afterScreenshot: blockScreenshots[affectedBlockNames[0]]?.after,
-                diffScreenshot: blockScreenshots[affectedBlockNames[0]]?.diff,
+                beforeScreenshot: blockScreenshots[firstKey]?.before,
+                afterScreenshot: blockScreenshots[firstKey]?.after,
+                diffScreenshot: blockScreenshots[firstKey]?.diff,
               },
               config.thresholds,
             );
 
             comparisons.push({
               pagePath: page.path, baseUrl, branchUrl, viewport: viewport.name,
-              status, selectionReasons: reasons, affectedBlocks: affectedBlockNames,
+              status, selectionReasons: reasons,
+              affectedBlocks: reportAffectedBlocks,
               affectedVariations,
               visual: worstVisual, summary,
-              beforeScreenshot: blockScreenshots[affectedBlockNames[0]]?.before,
-              afterScreenshot: blockScreenshots[affectedBlockNames[0]]?.after,
-              diffScreenshot: blockScreenshots[affectedBlockNames[0]]?.diff,
+              beforeScreenshot: blockScreenshots[firstKey]?.before,
+              afterScreenshot: blockScreenshots[firstKey]?.after,
+              diffScreenshot: blockScreenshots[firstKey]?.diff,
               blockScreenshots,
             });
           } catch (err) {
