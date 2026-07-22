@@ -52,7 +52,7 @@ export function selectRegressionPages(
       selected: affectedPages.map((page) => ({
         page,
         reasons: ['full-mode'],
-        affectedBlockNames: getAffectedBlocksOnPage(page, affectedBlockNames),
+        affectedBlockNames: getAffectedBlocksOnPage(page, affectedBlockNames, affectedVariations),
         affectedVariations: getAffectedVariationsOnPage(page, affectedBlockNames, affectedVariations),
       })),
       skipped: 0,
@@ -118,7 +118,7 @@ function selectRepresentativePages(
     for (const page of sortedPages) {
       if (selectedPaths.size >= config.maximumPages) break;
 
-      const affectedOnPage = getAffectedBlocksOnPage(page, affectedBlockNames);
+      const affectedOnPage = getAffectedBlocksOnPage(page, affectedBlockNames, affectedVariations);
       const newVariations: string[] = [];
 
       for (const blockName of affectedOnPage) {
@@ -174,7 +174,7 @@ function selectRepresentativePages(
     selected.push({
       page,
       reasons: ['high-priority'],
-      affectedBlockNames: getAffectedBlocksOnPage(page, affectedBlockNames),
+      affectedBlockNames: getAffectedBlocksOnPage(page, affectedBlockNames, affectedVariations),
       affectedVariations: getAffectedVariationsOnPage(page, affectedBlockNames, affectedVariations),
     });
   }
@@ -182,8 +182,22 @@ function selectRepresentativePages(
   return selected;
 }
 
-function getAffectedBlocksOnPage(page: IndexedPage, affectedBlockNames: string[]): string[] {
-  return page.blocks.filter((b) => affectedBlockNames.includes(b.name)).map((b) => b.name);
+function getAffectedBlocksOnPage(
+  page: IndexedPage,
+  affectedBlockNames: string[],
+  affectedVariations: Record<string, string[]> = {},
+): string[] {
+  return page.blocks
+    .filter((b) => {
+      if (!affectedBlockNames.includes(b.name)) return false;
+      const changedVars = affectedVariations[b.name] ?? [];
+      // No specific variations tracked → any page with this block qualifies
+      if (changedVars.length === 0) return true;
+      // Only include if the page actually uses one of the changed variations
+      const pageVars = b.variations.map((v) => v.toLowerCase());
+      return changedVars.some((cv) => pageVars.includes(cv.toLowerCase()));
+    })
+    .map((b) => b.name);
 }
 
 /**

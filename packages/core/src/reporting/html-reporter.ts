@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
-import { join } from 'path';
+import { join, relative, isAbsolute } from 'path';
 import { RegressionReport, PageComparisonResult } from './types.js';
 
 const STATUS_EMOJI: Record<string, string> = {
@@ -410,7 +410,7 @@ function buildPageGroup(
 function buildBlockSection(
   blockName: string,
   comparisons: PageComparisonResult[],
-  _outputDir: string,
+  outputDir: string,
 ): string {
   const overallStatus = worstStatus(comparisons);
   const color = STATUS_COLOR[overallStatus] ?? '#94a3b8';
@@ -444,9 +444,9 @@ function buildBlockSection(
   // ── Image row ──
   const imgRowCells = comparisons
     .map((c, i) => {
-      const before = toDataUri(c.beforeScreenshot);
-      const after  = toDataUri(c.afterScreenshot);
-      const diff   = toDataUri(c.diffScreenshot);
+      const before = toDataUri(c.beforeScreenshot) ?? toRelativeSrc(c.beforeScreenshot, outputDir);
+      const after  = toDataUri(c.afterScreenshot)  ?? toRelativeSrc(c.afterScreenshot, outputDir);
+      const diff   = toDataUri(c.diffScreenshot)   ?? toRelativeSrc(c.diffScreenshot, outputDir);
       return (i > 0 ? `<div class="vp-sep"></div>` : '') +
         shotCell(before) +
         shotCell(after) +
@@ -502,6 +502,20 @@ function buildBlockSection(
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Convert an absolute screenshot path to a relative path from outputDir.
+ * Used as fallback when base64 embedding fails (e.g. file already moved).
+ */
+function toRelativeSrc(filePath: string | undefined, outputDir: string): string | null {
+  if (!filePath) return null;
+  try {
+    const rel = isAbsolute(filePath) ? relative(outputDir, filePath) : filePath;
+    return rel.replace(/\\/g, '/');
+  } catch {
+    return null;
+  }
+}
 
 function shotCell(src: string | null): string {
   if (!src) {
