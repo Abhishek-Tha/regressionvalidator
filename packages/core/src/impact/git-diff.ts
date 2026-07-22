@@ -150,6 +150,9 @@ export function extractChangedVariations(blockName: string, diffContent: string)
     if (!/[{,]\s*$/.test(stripped)) return false;
     // Shouldn't look like a property: "  color: red,"  — has word chars then colon then space+value
     if (/^\s*[\w-]+\s*:/.test(stripped)) return false;
+    // At-rules like @media, @keyframes, @layer, @supports open a new brace scope
+    // but are NOT CSS selectors with variation class names — exclude them.
+    if (/^\s*@/.test(stripped)) return false;
     return true;
   }
 
@@ -214,6 +217,54 @@ export function extractChangedVariations(blockName: string, diffContent: string)
 
   // Remove the block name itself if it snuck in
   variationSet.delete(blockName.toLowerCase());
+
+  // If we detected only specific variations, we must also check whether any
+  // changed lines fell into an EMPTY selector context (i.e. base block styles
+  // like `.columns { color: red }` where the selector line itself was not
+  // changed but the property inside was).  When that happens `currentSelectors`
+  // is empty, nothing is added to `variationSet`, but the base block DID
+  // change — meaning ALL variations are affected.  Detect this by re-scanning
+  // for changed property lines that have no enclosing variation selector.
+  if (variationSet.size > 0) {
+    let checkSelectors: string[] = [];
+    let checkBraceDepth = 0;
+    const checkStack: Array<{ depth: number; selectors: string[] }> = [];
+    let hasBaseBlockChange = false;
+
+    for (const rawLine of lines) {
+      if (rawLine.startsWith('+++') || rawLine.startsWith('---') || rawLine.startsWith('@@')) {
+        continue;
+      }
+      const isChanged = rawLine.startsWith('+') || rawLine.startsWith('-');
+      const stripped = rawLine.replace(/^[+\- ]/, '');
+      const openBraces = (stripped.match(/\{/g) ?? []).length;
+      const closeBraces = (stripped.match(/\}/g) ?? []).length;
+
+      if (isSelectorLine(stripped)) {
+        checkStack.push({ depth: checkBraceDepth, selectors: checkSelectors });
+        checkSelectors = parseSelector(rawLine);
+      }
+
+      if (isChanged && !isSelectorLine(stripped)) {
+        // A property changed inside a context that has no variation selectors
+        if (checkSelectors.length === 0) {
+          hasBaseBlockChange = true;
+          break;
+        }
+      }
+
+      checkBraceDepth += openBraces - closeBraces;
+      while (checkStack.length > 0 && checkBraceDepth <= checkStack[checkStack.length - 1].depth) {
+        const popped = checkStack.pop()!;
+        checkSelectors = popped.selectors;
+      }
+    }
+
+    if (hasBaseBlockChange) {
+      // Base block styles changed → treat the entire block as affected
+      return [];
+    }
+  }
 
   return Array.from(variationSet);
 }

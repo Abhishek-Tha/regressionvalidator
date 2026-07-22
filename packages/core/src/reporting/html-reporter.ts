@@ -433,11 +433,50 @@ function buildBlockSection(
   comparisons: PageComparisonResult[],
   outputDir: string,
 ): string {
-  const overallStatus = worstStatus(comparisons);
-  const color = STATUS_COLOR[overallStatus] ?? '#94a3b8';
-  const emoji = STATUS_EMOJI[overallStatus] ?? '';
+  // ── Derive block-specific status from per-block visual diffs, not the page-level status.
+  // The page-level status represents the worst across ALL blocks; here we want the status
+  // scoped to this specific block so independent blocks don't pollute each other.
+  let blockStatus = 'passed';
+  const escalate = (to: string) => {
+    const order = ['failed', 'warning', 'unable-to-test', 'expected-change', 'passed'];
+    if (order.indexOf(to) < order.indexOf(blockStatus)) blockStatus = to;
+  };
+
+  for (const c of comparisons) {
+    if (!blockName) {
+      // Fallback (no block name) — use page-level status
+      escalate(c.status);
+      continue;
+    }
+    const blockShot = c.blockScreenshots?.[blockName];
+    if (!blockShot) {
+      // This viewport has no per-block screenshot — fall back to page-level status
+      escalate(c.status);
+      continue;
+    }
+    // We have a per-block screenshot; derive status from its visual diff
+    // The mismatch % is stored on the PageComparisonResult's visual when there is
+    // only one block per page, but with multiple blocks we can only infer pass/fail
+    // from whether the diff image exists. Use the page visual as a conservative proxy
+    // when it's the only block, otherwise mark unknown blocks as 'passed' to avoid
+    // false escalation.
+    const pageBlockNames = c.affectedBlocks ?? [];
+    if (pageBlockNames.length === 1 && pageBlockNames[0] === blockName) {
+      // Only this block on the page — page visual IS this block's visual
+      escalate(c.status);
+    } else {
+      // Multiple blocks — we can't attribute the page-level mismatch% to just this block.
+      // Default to 'passed' for the section status; the diff badge % tells the real story.
+      // Only escalate to 'unable-to-test' if the page couldn't be tested at all.
+      if (c.status === 'unable-to-test') escalate('unable-to-test');
+    }
+  }
+
+  const color = STATUS_COLOR[blockStatus] ?? '#94a3b8';
+  const emoji = STATUS_EMOJI[blockStatus] ?? '';
 
   // ── Diff summary badges ──
+  // For multi-block pages, show the page-level visual mismatch % as an approximation.
   const diffBadges = comparisons
     .map((c) => {
       const pct = c.visual?.mismatchPercent ?? null;
@@ -507,7 +546,7 @@ function buildBlockSection(
     ${chip}
     ${diffBadges}
     <span class="spacer"></span>
-    <span class="status-pill" style="background:${color}">${emoji} ${overallStatus}</span>
+    <span class="status-pill" style="background:${color}">${emoji} ${blockStatus}</span>
   </div>
   ${issuesHtml}
   <div class="block-screenshots">

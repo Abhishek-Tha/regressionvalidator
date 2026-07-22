@@ -184,7 +184,9 @@ async function run(): Promise<void> {
     core.endGroup();
 
     // ─── Step 3b: Scan pages for block usage (parallel, concurrency=3) ────────
-    // Single shared browser used for scan AND capture — avoids two browser launches
+    // Scan BOTH live and preview origins and merge block usage.
+    // This ensures blocks that are new/moved on the branch (but not yet on live)
+    // are still included in the affected-page set and captured correctly.
     core.startGroup('🔎 Scanning pages for block usage');
     const configHash = hashConfig(config);
     let index = createEmptyIndex(`${owner}/${repo}`, headRef, configHash);
@@ -196,9 +198,11 @@ async function run(): Promise<void> {
     try {
       await withConcurrency(pages, 3, async (p) => {
         const liveUrl = `${liveOrigin}${p.path}`;
+        const previewUrl = `${previewOrigin}${p.path}`;
         core.info(`  Scanning ${p.path}...`);
         try {
-          const scanned = await scanPage(
+          // Scan the live page
+          const scannedLive = await scanPage(
             sharedBrowser,
             liveUrl,
             p.path,
@@ -206,14 +210,52 @@ async function run(): Promise<void> {
             'en',
             config.blockDetection,
           );
-          indexedPages.push(scanned);
-          core.info(`    Blocks: ${scanned.blocks.map((b) => b.name).join(', ') || 'none'}`);
+
+          // Also scan the preview page and merge any additional blocks it exposes.
+          // This catches blocks that are new on the branch but absent on live.
+          let merged = scannedLive;
+          if (previewReady) {
+            try {
+              const scannedPreview = await scanPage(
+                sharedBrowser,
+                previewUrl,
+                p.path,
+                `${owner}/${repo}`,
+                'en',
+                config.blockDetection,
+              );
+              // Merge: start with live blocks, then add any block from preview not in live
+              const mergedBlocks = [...scannedLive.blocks];
+              for (const previewBlock of scannedPreview.blocks) {
+                const existing = mergedBlocks.find((b) => b.name === previewBlock.name);
+                if (!existing) {
+                  // Block only exists on branch — include it so it gets captured
+                  mergedBlocks.push(previewBlock);
+                  core.info(`    Branch-only block detected: ${previewBlock.name} on ${p.path}`);
+                } else {
+                  // Block exists on both — merge any additional variations from preview
+                  for (const v of previewBlock.variations) {
+                    if (!existing.variations.includes(v)) {
+                      existing.variations.push(v);
+                    }
+                  }
+                }
+              }
+              merged = { ...scannedLive, blocks: mergedBlocks };
+            } catch (previewErr) {
+              core.debug(`  Preview scan failed for ${p.path}: ${previewErr instanceof Error ? previewErr.message : String(previewErr)}`);
+              // Non-fatal — fall back to live scan results only
+            }
+          }
+
+          indexedPages.push(merged);
+          core.info(`    Blocks: ${merged.blocks.map((b) => b.name).join(', ') || 'none'}`);
         } catch (err) {
           core.warning(`  Failed to scan ${p.path}: ${err instanceof Error ? err.message : String(err)}`);
         }
       });
 
-      // Filter to pages that use a changed block
+      // Filter to pages that use a changed block (from either live or branch)
       const affectedSet = new Set(impact.allAffectedBlocks.map((b) => b.toLowerCase()));
       const relevantPages = indexedPages.filter((p) =>
         p.blocks.some((b) => affectedSet.has(b.name.toLowerCase())),
@@ -300,7 +342,7 @@ async function run(): Promise<void> {
               const blockCompDir = join(compDir, blockName);
               core.info(`    Clip block '${blockName}' selector: ${blockSelector}`);
 
-              const [baseShot, branchShot] = await Promise.all([
+              let [baseShot, branchShot] = await Promise.all([
                 captureBlockClip({
                   browser: sharedBrowser, url: baseUrl, label: 'before',
                   viewport, outputDir: blockCompDir, captureConfig: config.capture,
@@ -324,6 +366,31 @@ async function run(): Promise<void> {
                 anyCaptureFailed = true;
                 captureError = baseShot.error || branchShot.error;
                 continue;
+              }
+
+              // If one side found the block element (clip) but the other fell back to
+              // full-page, the two images have wildly different dimensions and a
+              // pixel-diff would produce a meaningless near-100% mismatch.
+              // Re-capture the clipped side as full-page to get a fair comparison.
+              if (baseShot.blockFound !== branchShot.blockFound) {
+                core.info(`      '${blockName}' block-found mismatch (base=${baseShot.blockFound}, branch=${branchShot.blockFound}) — re-capturing both as full-page`);
+                const fullPageSelector = 'body'; // full-page sentinel
+                const [baseFull, branchFull] = await Promise.all([
+                  captureBlockClip({
+                    browser: sharedBrowser, url: baseUrl, label: 'before-full',
+                    viewport, outputDir: blockCompDir, captureConfig: config.capture,
+                    blockSelector: fullPageSelector,
+                  }),
+                  captureBlockClip({
+                    browser: sharedBrowser, url: branchUrl, label: 'after-full',
+                    viewport, outputDir: blockCompDir, captureConfig: config.capture,
+                    blockSelector: fullPageSelector,
+                  }),
+                ]);
+                if (baseFull.success && branchFull.success) {
+                  baseShot = baseFull;
+                  branchShot = branchFull;
+                }
               }
 
               const diffPath = join(blockCompDir, `diff-${viewport.name}.png`);

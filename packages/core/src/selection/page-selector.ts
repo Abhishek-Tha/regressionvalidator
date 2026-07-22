@@ -138,30 +138,31 @@ function selectRepresentativePages(
         }
       }
 
-      if (newVariations.length === 0 && selectedPaths.has(page.path)) continue;
+      // Skip pages already selected AND contributing no new variation coverage
+      if (selectedPaths.has(page.path) && newVariations.length === 0) continue;
 
-      if (newVariations.length > 0 || !selectedPaths.has(page.path)) {
-        if (!selectedPaths.has(page.path)) {
-          selectedPaths.add(page.path);
-          const reasons = newVariations.length > 0
-            ? newVariations.map((v) => `covers-variation:${v}`)
-            : ['high-priority'];
+      // Apply locale filter if configured
+      if (config.includeLocales && !config.includeLocales.includes(page.locale)) {
+        continue;
+      }
 
-          // Apply locale filter if configured
-          if (config.includeLocales && !config.includeLocales.includes(page.locale)) {
-            continue;
-          }
+      if (!selectedPaths.has(page.path)) {
+        selectedPaths.add(page.path);
+        const reasons = newVariations.length > 0
+          ? newVariations.map((v) => `covers-variation:${v}`)
+          : ['high-priority'];
 
-          selected.push({
-            page,
-            reasons,
-            affectedBlockNames: affectedOnPage,
-            affectedVariations: getAffectedVariationsOnPage(page, affectedBlockNames, affectedVariations),
-          });
-          for (const key of newVariations) {
-            coveredVariations.set(key, (coveredVariations.get(key) ?? 0) + 1);
-          }
-        }
+        selected.push({
+          page,
+          reasons,
+          affectedBlockNames: affectedOnPage,
+          affectedVariations: getAffectedVariationsOnPage(page, affectedBlockNames, affectedVariations),
+        });
+      }
+
+      // Track coverage regardless of whether the page was newly added
+      for (const key of newVariations) {
+        coveredVariations.set(key, (coveredVariations.get(key) ?? 0) + 1);
       }
     }
   }
