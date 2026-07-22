@@ -41,8 +41,11 @@ export function selectRegressionPages(
       const changedVars = affectedVariations[b.name] ?? [];
       // If no specific variations are tracked, any page using this block qualifies
       if (changedVars.length === 0) return true;
-      // Otherwise require the page to actually use one of the changed variations
       const pageVars = b.variations.map((v) => v.toLowerCase());
+      // A page using the BASE block (no variation classes) is always affected by
+      // any CSS change to that block — the base layout styles may have changed.
+      if (pageVars.length === 0) return true;
+      // Otherwise require the page to actually use one of the changed variations
       return changedVars.some((cv) => pageVars.includes(cv.toLowerCase()));
     }),
   );
@@ -193,8 +196,11 @@ function getAffectedBlocksOnPage(
       const changedVars = affectedVariations[b.name] ?? [];
       // No specific variations tracked → any page with this block qualifies
       if (changedVars.length === 0) return true;
-      // Only include if the page actually uses one of the changed variations
       const pageVars = b.variations.map((v) => v.toLowerCase());
+      // A page using the BASE block (no variation classes) is always affected —
+      // the base layout/style could have changed.
+      if (pageVars.length === 0) return true;
+      // Only include if the page actually uses one of the changed variations
       return changedVars.some((cv) => pageVars.includes(cv.toLowerCase()));
     })
     .map((b) => b.name);

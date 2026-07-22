@@ -98,4 +98,57 @@ describe('selectRegressionPages', () => {
     expect(result.selected[0].affectedBlockNames).toContain('cards');
     expect(result.selected[0].affectedBlockNames).toContain('hero');
   });
+
+  // ── Variation-scoped filtering: base-block pages must always be included ──
+
+  it('includes pages that use the BASE block (no variations) when only a specific variation changed', () => {
+    // Scenario: only "columns" CSS for the "stack-view" variation changed.
+    // A page using the base "columns" block (no variation classes) must still be
+    // selected — the base layout styles could be affected.
+    const pages = [
+      makePage('/', [{ name: 'columns', variations: [] }]),           // homepage: base columns
+      makePage('/landing', [{ name: 'columns', variations: ['stack-view'] }]), // landing: specific variation
+      makePage('/other', [{ name: 'hero', variations: [] }]),         // unrelated
+    ];
+
+    const affectedVariations = { columns: ['stack-view'] };
+    const result = selectRegressionPages(pages, ['columns'], representativeConfig, affectedVariations);
+
+    const selectedPaths = result.selected.map((s) => s.page.path);
+    expect(selectedPaths).toContain('/');             // base block — must be included
+    expect(selectedPaths).toContain('/landing');      // specific variation — must be included
+    expect(selectedPaths).not.toContain('/other');    // unrelated block — must be excluded
+    expect(result.totalAffected).toBe(2);
+  });
+
+  it('includes "columns" in affectedBlockNames for a base-block page when variation CSS changed', () => {
+    // The block must appear in affectedBlockNames for the capture phase to
+    // screenshot it and detect visual drift.
+    const pages = [
+      makePage('/', [{ name: 'columns', variations: [] }]),
+    ];
+
+    const affectedVariations = { columns: ['stack-view'] };
+    const result = selectRegressionPages(pages, ['columns'], representativeConfig, affectedVariations);
+
+    expect(result.selected).toHaveLength(1);
+    expect(result.selected[0].affectedBlockNames).toContain('columns');
+  });
+
+  it('does not include pages whose blocks do not match any affected block even when variations are empty', () => {
+    const pages = [
+      makePage('/page-a', [{ name: 'cards', variations: ['body-highlight'] }]),
+      makePage('/page-b', [{ name: 'cards', variations: [] }]),          // base cards
+      makePage('/page-c', [{ name: 'columns', variations: [] }]),        // different block — unrelated
+    ];
+
+    // Only "cards.body-highlight" variation changed
+    const affectedVariations = { cards: ['body-highlight'] };
+    const result = selectRegressionPages(pages, ['cards'], representativeConfig, affectedVariations);
+
+    const selectedPaths = result.selected.map((s) => s.page.path);
+    expect(selectedPaths).toContain('/page-a');  // uses the changed variation
+    expect(selectedPaths).toContain('/page-b');  // base cards — always affected
+    expect(selectedPaths).not.toContain('/page-c'); // unrelated block
+  });
 });
