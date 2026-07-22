@@ -57,15 +57,18 @@ export function getDiffContent(
  * Extract the specific CSS variation class names that were modified in a block's diff.
  *
  * EDS blocks use classes like:
- *   .cards.body-highlight { ... }
- *   .cards .body-highlight { ... }    ← descendant child
- *   .body-highlight { ... }           ← inside blocks/cards/cards.css context
+ *   .cards.body-highlight { ... }        ← compound (DA: "Cards (body-highlight)")
+ *   .cards .body-highlight { ... }       ← descendant
+ *   .body-highlight { ... }              ← inside blocks/cards/cards.css context
  *
- * Strategy:
- *  1. Look at only changed lines (starting with + or -) in the diff.
- *  2. Extract class selectors that are NOT the block name itself.
- *  3. Deduplicate and normalise.
- *  4. If no specific variation selectors are found → treat the entire block as changed.
+ * Strategy (context-aware):
+ *  Walk every line of the diff maintaining the "current CSS selector" context.
+ *  A changed property line (+/-) inside a selector block means that selector's
+ *  variation was modified — even if the selector line itself is unchanged context.
+ *
+ *  Additionally scan added/removed selector lines for inline variation references.
+ *
+ *  If no specific variation selectors are found → treat the entire block as changed.
  *
  * @param blockName   The block folder name, e.g. "cards"
  * @param diffContent Raw unified diff text for the block's CSS files
@@ -73,62 +76,150 @@ export function getDiffContent(
 export function extractChangedVariations(blockName: string, diffContent: string): string[] {
   if (!diffContent.trim()) return [];
 
-  const changedLines = diffContent
-    .split('\n')
-    .filter((line) => (line.startsWith('+') || line.startsWith('-')) && !line.startsWith('+++') && !line.startsWith('---'));
-
-  const variationSet = new Set<string>();
-
-  const blockClass = blockName.replace(/-/g, '[\\-]');
-
-  // Ignored utility/state classes that are not variations
-  const ignored = new Set([
-    blockName,
+  // Ignored utility/state classes that are not EDS variations
+  const IGNORED = new Set([
+    blockName.toLowerCase(),
     'block',
     'initialized',
     'loading',
     'loaded',
     'appear',
-    'dark',       // keep 'dark' as it could be a real variation — remove from ignored if needed
-    'is-',
-    'has-',
   ]);
-  // Remove 'dark' from ignored — it can be a genuine variation
-  ignored.delete('dark');
 
-  for (const line of changedLines) {
-    // Pattern 1: compound .blockname.variation
+  const variationSet = new Set<string>();
+
+  /**
+   * Given a CSS selector string, extract variation class names that belong to this block.
+   * Handles:
+   *   .cards.body-highlight         → body-highlight
+   *   .cards .body-highlight        → body-highlight
+   *   .body-highlight               → body-highlight  (file is already scoped to block)
+   */
+  function extractVariationsFromSelector(selector: string): string[] {
+    const found: string[] = [];
+    const bn = blockName.toLowerCase();
+
+    // Pattern A: .blockname.variation (compound — no space)
+    const compoundRe = new RegExp(`\\.${escapeForRegex(bn)}\\.([a-z][a-z0-9-]+)`, 'gi');
     let m: RegExpExecArray | null;
-    const cp = new RegExp(`\\.${blockClass}[.\\s]+\\.([a-z][a-z0-9-]*)`, 'gi');
-    while ((m = cp.exec(line)) !== null) {
+    while ((m = compoundRe.exec(selector)) !== null) {
       const v = m[1].toLowerCase();
-      if (!ignored.has(v) && v.length > 1) variationSet.add(v);
+      if (!IGNORED.has(v)) found.push(v);
     }
 
-    // Pattern 2: sibling .blockname.variation
-    const sp = new RegExp(`\\.${blockClass}\\.([a-z][a-z0-9-]+)`, 'gi');
-    while ((m = sp.exec(line)) !== null) {
+    // Pattern B: .blockname followed by space then .variation (descendant)
+    const descendantRe = new RegExp(`\\.${escapeForRegex(bn)}\\s+\\.([a-z][a-z0-9-]+)`, 'gi');
+    while ((m = descendantRe.exec(selector)) !== null) {
       const v = m[1].toLowerCase();
-      if (!ignored.has(v) && v.length > 1) variationSet.add(v);
+      if (!IGNORED.has(v)) found.push(v);
     }
 
-    // Pattern 3: standalone class selectors — only if the line is a CSS selector line
-    // (i.e. it contains { or , or > after the class name)
-    if (/\.[a-z][a-z0-9-]+\s*[{,>~+]/.test(line)) {
-      const stp = /\.([a-z][a-z0-9-]+)\s*[{,>~+\s]/g;
-      while ((m = stp.exec(line)) !== null) {
+    // Pattern C: standalone .variation class (only non-block-name classes)
+    // Only applies when the selector does NOT contain the block name at all,
+    // i.e. the whole file is scoped to this block (blocks/cards/cards.css)
+    if (!selector.includes(`.${bn}`)) {
+      const standaloneRe = /\.([a-z][a-z0-9-]+)/g;
+      while ((m = standaloneRe.exec(selector)) !== null) {
         const v = m[1].toLowerCase();
-        if (!ignored.has(v) && v !== blockName && v.length > 1) {
+        if (!IGNORED.has(v)) found.push(v);
+      }
+    }
+
+    return found;
+  }
+
+  /**
+   * Parse a selector line that may contain multiple selectors (comma-separated)
+   * and return all class tokens that match variations.
+   */
+  function parseSelector(line: string): string[] {
+    // Strip the leading diff character (+/-/ ) and trailing {
+    const stripped = line.replace(/^[+\- ]/, '').replace(/\{.*$/, '').trim();
+    // Handle comma-separated selectors
+    return stripped.split(',').flatMap((s) => extractVariationsFromSelector(s.trim()));
+  }
+
+  /**
+   * Determine if a (stripped) line is a CSS selector line.
+   * Selector lines end with { or , (multi-selector) and don't contain :
+   * followed by a value (property lines look like "color: red;").
+   */
+  function isSelectorLine(stripped: string): boolean {
+    if (!stripped) return false;
+    // Must end with { or , (possibly followed by whitespace)
+    if (!/[{,]\s*$/.test(stripped)) return false;
+    // Shouldn't look like a property: "  color: red,"  — has word chars then colon then space+value
+    if (/^\s*[\w-]+\s*:/.test(stripped)) return false;
+    return true;
+  }
+
+  const lines = diffContent.split('\n');
+
+  // Current active CSS selectors (the selector(s) whose rule-block we are inside).
+  // We stack them because CSS can be nested (media queries wrapping rules).
+  // For our purposes we only need the innermost rule's selector.
+  let currentSelectors: string[] = [];
+  let braceDepth = 0;
+  // Track per-depth what selector was set (so we can pop correctly)
+  const selectorStack: Array<{ depth: number; selectors: string[] }> = [];
+
+  for (const rawLine of lines) {
+    // Skip diff file headers
+    if (rawLine.startsWith('+++') || rawLine.startsWith('---') || rawLine.startsWith('@@')) {
+      continue;
+    }
+
+    const isAdded = rawLine.startsWith('+');
+    const isRemoved = rawLine.startsWith('-');
+    const isChanged = isAdded || isRemoved;
+
+    // Strip the leading diff character for content analysis
+    const stripped = rawLine.replace(/^[+\- ]/, '');
+
+    // Count braces to track CSS rule nesting
+    const openBraces = (stripped.match(/\{/g) ?? []).length;
+    const closeBraces = (stripped.match(/\}/g) ?? []).length;
+
+    // If this is a selector line (context OR added), update our selector tracking
+    if (isSelectorLine(stripped)) {
+      // Push the new selector scope
+      selectorStack.push({ depth: braceDepth, selectors: currentSelectors });
+      currentSelectors = parseSelector(rawLine);
+    }
+
+    // If it's a changed line (+ or -), record variations from the current selector context
+    if (isChanged) {
+      if (isSelectorLine(stripped)) {
+        // The selector itself changed — extract variations from it directly
+        for (const v of parseSelector(rawLine)) {
+          variationSet.add(v);
+        }
+      } else {
+        // A property/value changed — attribute it to the enclosing selector
+        for (const v of currentSelectors) {
           variationSet.add(v);
         }
       }
     }
+
+    // Update brace depth AFTER processing the line
+    braceDepth += openBraces - closeBraces;
+
+    // Pop selector stack when we close back to a previous depth
+    while (selectorStack.length > 0 && braceDepth <= selectorStack[selectorStack.length - 1].depth) {
+      const popped = selectorStack.pop()!;
+      currentSelectors = popped.selectors;
+    }
   }
 
-  // Clean up: remove the block name itself if it snuck in
+  // Remove the block name itself if it snuck in
   variationSet.delete(blockName.toLowerCase());
 
   return Array.from(variationSet);
+}
+
+function escapeForRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /**
