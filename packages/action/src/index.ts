@@ -7,7 +7,8 @@ import {
   analyzeImpact,
   selectRegressionPages,
   launchBrowser,
-  captureBlockClip,
+  navigateAndStabilize,
+  clipBlockFromPage,
   compareVisuals,
   classifyPageStatus,
   buildRegressionReport,
@@ -355,27 +356,41 @@ async function run(): Promise<void> {
             }
           }
 
-          // ── Execute captures ──────────────────────────────────────────────
+          // ── Execute captures — PAGE REUSE ─────────────────────────────────
+          // Load base and branch URLs ONCE per viewport (in parallel), then
+          // clip each block from the already-loaded pages. This eliminates
+          // N×page-loads (previously one per block) and replaces networkidle2
+          // with a fast domcontentloaded + decoration-complete wait.
           const blockScreenshots: Record<string, { before?: string; after?: string; diff?: string }> = {};
           let worstVisual: import('@blockguard/core').VisualDiffResult | undefined;
           let anyCaptureFailed = false;
           let captureError: string | undefined;
 
+          const basePage = await sharedBrowser.newPage();
+          const branchPage = await sharedBrowser.newPage();
+
           try {
+            // Navigate both sides in parallel — biggest single time saving
+            const [baseNavErr, branchNavErr] = await Promise.allSettled([
+              navigateAndStabilize(basePage, baseUrl, viewport, config.capture),
+              navigateAndStabilize(branchPage, branchUrl, viewport, config.capture),
+            ]);
+
+            if (baseNavErr.status === 'rejected') {
+              throw new Error(`Base navigation failed: ${baseNavErr.reason}`);
+            }
+            if (branchNavErr.status === 'rejected') {
+              core.warning(`  Branch navigation failed for ${page.path} @ ${viewport.name}: ${branchNavErr.reason}`);
+              // Non-fatal: still try to clip from whatever loaded
+            }
+
+            // Clip every block from the already-loaded pages (no re-navigation)
             for (const capture of blockCapturePlan) {
               core.info(`    Clip '${capture.key}' selector: ${capture.selector}`);
 
               let [baseShot, branchShot] = await Promise.all([
-                captureBlockClip({
-                  browser: sharedBrowser, url: baseUrl, label: 'before',
-                  viewport, outputDir: capture.captureDir, captureConfig: config.capture,
-                  blockSelector: capture.selector,
-                }),
-                captureBlockClip({
-                  browser: sharedBrowser, url: branchUrl, label: 'after',
-                  viewport, outputDir: capture.captureDir, captureConfig: config.capture,
-                  blockSelector: capture.selector,
-                }),
+                clipBlockFromPage(basePage, capture.selector, 'before', viewport, capture.captureDir),
+                clipBlockFromPage(branchPage, capture.selector, 'after', viewport, capture.captureDir),
               ]);
 
               if (!baseShot.blockFound) {
@@ -391,21 +406,13 @@ async function run(): Promise<void> {
                 continue;
               }
 
-              // If one side clipped but the other fell back to full-page, re-capture
+              // If one side clipped but the other fell back to full-page, re-clip
               // both as full-page so dimensions match for a fair pixel diff.
               if (baseShot.blockFound !== branchShot.blockFound) {
-                core.info(`      '${capture.key}' block-found mismatch — re-capturing both as full-page`);
+                core.info(`      '${capture.key}' block-found mismatch — re-clipping both as full-page`);
                 const [baseFull, branchFull] = await Promise.all([
-                  captureBlockClip({
-                    browser: sharedBrowser, url: baseUrl, label: 'before-full',
-                    viewport, outputDir: capture.captureDir, captureConfig: config.capture,
-                    blockSelector: 'body',
-                  }),
-                  captureBlockClip({
-                    browser: sharedBrowser, url: branchUrl, label: 'after-full',
-                    viewport, outputDir: capture.captureDir, captureConfig: config.capture,
-                    blockSelector: 'body',
-                  }),
+                  clipBlockFromPage(basePage, 'body', 'before-full', viewport, capture.captureDir),
+                  clipBlockFromPage(branchPage, 'body', 'after-full', viewport, capture.captureDir),
                 ]);
                 if (baseFull.success && branchFull.success) {
                   baseShot = baseFull;
@@ -478,6 +485,9 @@ async function run(): Promise<void> {
               status: 'unable-to-test', selectionReasons: reasons, affectedBlocks: affectedBlockNames,
               summary: `Comparison error: ${msg}`, error: msg,
             });
+          } finally {
+            // Always close the reused pages to free browser resources
+            await Promise.allSettled([basePage.close(), branchPage.close()]);
           }
         }
       });

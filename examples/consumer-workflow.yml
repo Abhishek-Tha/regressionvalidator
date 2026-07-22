@@ -5,6 +5,16 @@
 #   .github/workflows/blockguard.yml
 #
 # Then update the four values marked with ← below.
+#
+# Performance notes:
+#   • paths filter: only runs when block source files actually change.
+#     Remove "styles/**" and "scripts/**" if those are not block-specific —
+#     running on every CSS/JS change outside blocks/ wastes 5–10 min per PR.
+#   • max-pages: cap at 8 for representative mode. The selection algorithm
+#     already picks the best pages; 8 covers all block variations for typical
+#     EDS sites. Increase to 15–20 only for very large sites in full mode.
+#   • timeout-minutes: 10 min is achievable with page-reuse captures.
+#     Raise to 15 only if you have many viewports or very slow preview deploys.
 # ──────────────────────────────────────────────────────────────────────────────
 
 name: EDS Block Regression (BlockGuard)
@@ -12,12 +22,12 @@ name: EDS Block Regression (BlockGuard)
 on:
   pull_request:
     paths:
+      # Only trigger when block implementation files change.
+      # Remove entries that don't live inside blocks/ to avoid
+      # unnecessary runs on unrelated style/script changes.
       - "blocks/**"
-      - "scripts/**"
-      - "styles/**"
-      - "icons/**"
       - "blockguard.config.yml"
-  # Manual trigger for ad-hoc testing
+  # Manual trigger for ad-hoc testing or running in full mode
   workflow_dispatch:
     inputs:
       mode:
@@ -28,6 +38,10 @@ on:
         options:
           - representative
           - full
+      max_pages:
+        description: "Maximum pages to test (representative mode)"
+        required: false
+        default: "8"
 
 permissions:
   contents: read
@@ -37,7 +51,9 @@ permissions:
 jobs:
   blockguard:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 10 min is achievable with page-reuse + domcontentloaded captures.
+    # Raise to 15 if you add mobile viewports or have slow preview deploys.
+    timeout-minutes: 10
 
     steps:
       - name: Checkout repository
@@ -55,7 +71,9 @@ jobs:
           page-index-url: https://main--your-eds-site--your-org.aem.live/query-index.json  # ← live query-index URL
           github-token: ${{ secrets.GITHUB_TOKEN }}
           mode: ${{ inputs.mode || 'representative' }}
-          max-pages: "15"
+          # 8 pages covers all block variations for most EDS sites in ~3-5 min.
+          # The representative selector picks highest-traffic pages first.
+          max-pages: ${{ inputs.max_pages || '8' }}
           fail-on-regression: "false"  # advisory mode — never blocks the PR
           advisory-mode: "true"
 

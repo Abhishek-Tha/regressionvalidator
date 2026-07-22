@@ -17,14 +17,14 @@ export async function scanPage(
   const page = await browser.newPage();
 
   try {
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30_000 });
-
-    // Wait for EDS block decoration
+    // domcontentloaded is sufficient for block detection — we only need the DOM,
+    // not analytics/beacon requests that keep networkidle2 waiting 15-25s.
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    // Wait for EDS block decoration to complete (blocks shed the "loading" class).
+    // 12s cap is generous — decoration typically finishes in 1-3s.
     await page
-      .waitForFunction(() => !document.querySelector('.block.loading'), { timeout: 15_000 })
-      .catch(() => {
-        // Non-fatal — proceed even if loading class persists
-      });
+      .waitForFunction(() => !document.querySelector('.block.loading'), { timeout: 12_000 })
+      .catch(() => {/* non-fatal — proceed even if loading class persists */});
 
     const blocks = await page.evaluate(
       (selector: string, ignoredClasses: string[]) => {

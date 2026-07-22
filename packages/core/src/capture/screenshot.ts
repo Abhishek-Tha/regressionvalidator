@@ -1,4 +1,4 @@
-import puppeteer, { Browser } from 'puppeteer';
+import puppeteer, { Browser, Page } from 'puppeteer';
 import { mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { CaptureConfig, ViewportConfig } from '../config/schema.js';
@@ -28,71 +28,6 @@ export interface CapturePageOptions {
 }
 
 /**
- * Take a full-page screenshot of a URL at the given viewport.
- */
-export async function captureScreenshot(options: CapturePageOptions): Promise<ScreenshotResult> {
-  const { browser, url, label, viewport, outputDir, captureConfig } = options;
-
-  if (!existsSync(outputDir)) {
-    mkdirSync(outputDir, { recursive: true });
-  }
-
-  const filename = `${label}-${viewport.name}.png`;
-  const filePath = join(outputDir, filename);
-
-  const page = await browser.newPage();
-
-  try {
-    await page.setViewport({
-      width: viewport.width,
-      height: viewport.height,
-      deviceScaleFactor: 1,
-    });
-
-    // Set timezone via Chrome DevTools Protocol
-    const cdp = await page.createCDPSession();
-    await cdp.send('Emulation.setTimezoneOverride', { timezoneId: captureConfig.timezone });
-
-    await page.setExtraHTTPHeaders({
-      'Accept-Language': captureConfig.locale,
-    });
-
-    await page.goto(url, {
-      waitUntil: 'networkidle2',
-      timeout: 60_000,
-    });
-
-    await stabilizePage(page, captureConfig);
-
-    // Full-page screenshot (scroll-capture) for accurate below-the-fold comparison.
-    await page.screenshot({
-      path: filePath as `${string}.png`,
-      fullPage: true,
-    });
-
-    return {
-      url,
-      viewport: viewport.name,
-      filePath,
-      capturedAt: new Date().toISOString(),
-      success: true,
-    };
-  } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
-    return {
-      url,
-      viewport: viewport.name,
-      filePath: '',
-      capturedAt: new Date().toISOString(),
-      success: false,
-      error,
-    };
-  } finally {
-    await page.close();
-  }
-}
-
-/**
  * Launch a reusable Puppeteer browser with consistent settings.
  */
 export async function launchBrowser(): Promise<Browser> {
@@ -110,61 +45,66 @@ export async function launchBrowser(): Promise<Browser> {
 }
 
 /**
- * Capture screenshots at multiple viewports for a single URL.
+ * Navigate an existing Puppeteer Page to a URL and stabilize it.
+ *
+ * Uses `domcontentloaded` + EDS block-decoration wait instead of
+ * `networkidle2` to avoid waiting for long-tail analytics/font requests.
+ * Maximum navigation timeout is capped at 30s.
  */
-export async function captureMultiViewport(
-  browser: Browser,
+export async function navigateAndStabilize(
+  page: Page,
   url: string,
-  label: string,
-  viewports: ViewportConfig[],
-  outputDir: string,
+  viewport: ViewportConfig,
   captureConfig: CaptureConfig,
-): Promise<ScreenshotResult[]> {
-  const results: ScreenshotResult[] = [];
+): Promise<void> {
+  await page.setViewport({ width: viewport.width, height: viewport.height, deviceScaleFactor: 1 });
 
-  for (const viewport of viewports) {
-    const result = await captureScreenshot({
-      browser,
-      url,
-      label,
-      viewport,
-      outputDir,
-      captureConfig,
+  const cdp = await page.createCDPSession();
+  await cdp.send('Emulation.setTimezoneOverride', { timezoneId: captureConfig.timezone });
+  await page.setExtraHTTPHeaders({ 'Accept-Language': captureConfig.locale });
+
+  // Use domcontentloaded — much faster than networkidle2 for AEM/EDS pages that
+  // keep analytics/beacon connections open indefinitely.
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+
+  // Wait for EDS block decoration to complete (blocks remove the "loading" class).
+  // This replaces the networkidle2 wait and is typically done in 1-3s.
+  await page
+    .waitForFunction(
+      () => !document.querySelector('.block.loading'),
+      { timeout: 12_000 },
+    )
+    .catch(() => {
+      // Non-fatal — proceed even if some blocks stay in loading state
     });
-    results.push(result);
-  }
 
-  return results;
+  // Now apply stabilization (animations off, mask dynamic content, settle delay)
+  await stabilizePage(page, captureConfig);
 }
 
 /**
- * Navigate to a URL, find the first element matching `blockSelector`,
- * and screenshot only the clipped bounding box of that element.
- * Falls back to a full-page screenshot if the block is not found.
+ * Clip a single block from an already-navigated & stabilized Puppeteer page.
+ * Does NOT open or close the page — caller manages the page lifecycle.
+ *
+ * Returns a BlockClipResult. Falls back to a full-page screenshot if the
+ * block selector does not match any element.
  */
-export async function captureBlockClip(options: CapturePageOptions & {
-  blockSelector: string;
-}): Promise<BlockClipResult> {
-  const { browser, url, label, viewport, outputDir, captureConfig, blockSelector } = options;
-
+export async function clipBlockFromPage(
+  page: Page,
+  blockSelector: string,
+  label: string,
+  viewport: ViewportConfig,
+  outputDir: string,
+): Promise<BlockClipResult> {
   if (!existsSync(outputDir)) {
     mkdirSync(outputDir, { recursive: true });
   }
 
   const filename = `${label}-${viewport.name}.png`;
   const filePath = join(outputDir, filename);
-  const page = await browser.newPage();
+  const url = page.url();
 
   try {
-    await page.setViewport({ width: viewport.width, height: viewport.height, deviceScaleFactor: 1 });
-    const cdp = await page.createCDPSession();
-    await cdp.send('Emulation.setTimezoneOverride', { timezoneId: captureConfig.timezone });
-    await page.setExtraHTTPHeaders({ 'Accept-Language': captureConfig.locale });
-
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 60_000 });
-    await stabilizePage(page, captureConfig);
-
-    // Try to find the block and get its bounding box
     const box = await page.evaluate((sel: string) => {
       const el = document.querySelector(sel);
       if (!el) return null;
@@ -196,7 +136,7 @@ export async function captureBlockClip(options: CapturePageOptions & {
       };
     }
 
-    // Block not found — fall back to full-page screenshot
+    // Block not found — fall back to full-page
     await page.screenshot({ path: filePath as `${string}.png`, fullPage: true });
     return {
       url, viewport: viewport.name, filePath,
@@ -210,14 +150,93 @@ export async function captureBlockClip(options: CapturePageOptions & {
       capturedAt: new Date().toISOString(),
       success: false, blockFound: false, error,
     };
+  }
+}
+
+/**
+ * Take a full-page screenshot of a URL at the given viewport.
+ * Opens and closes its own Puppeteer page.
+ */
+export async function captureScreenshot(options: CapturePageOptions): Promise<ScreenshotResult> {
+  const { browser, url, label, viewport, outputDir, captureConfig } = options;
+
+  if (!existsSync(outputDir)) {
+    mkdirSync(outputDir, { recursive: true });
+  }
+
+  const filename = `${label}-${viewport.name}.png`;
+  const filePath = join(outputDir, filename);
+  const page = await browser.newPage();
+
+  try {
+    await navigateAndStabilize(page, url, viewport, captureConfig);
+    await page.screenshot({ path: filePath as `${string}.png`, fullPage: true });
+    return {
+      url, viewport: viewport.name, filePath,
+      capturedAt: new Date().toISOString(),
+      success: true,
+    };
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    return {
+      url, viewport: viewport.name, filePath: '',
+      capturedAt: new Date().toISOString(),
+      success: false, error,
+    };
   } finally {
     await page.close();
   }
 }
 
 /**
+ * Navigate to a URL, find the first element matching `blockSelector`,
+ * and screenshot only the clipped bounding box of that element.
+ * Falls back to a full-page screenshot if the block is not found.
+ *
+ * Opens and closes its own Puppeteer page (legacy single-call API).
+ * Prefer navigateAndStabilize + clipBlockFromPage for multi-block pages.
+ */
+export async function captureBlockClip(options: CapturePageOptions & {
+  blockSelector: string;
+}): Promise<BlockClipResult> {
+  const { browser, url, label, viewport, outputDir, captureConfig, blockSelector } = options;
+  const page = await browser.newPage();
+  try {
+    await navigateAndStabilize(page, url, viewport, captureConfig);
+    return await clipBlockFromPage(page, blockSelector, label, viewport, outputDir);
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    return {
+      url, viewport: viewport.name, filePath: '',
+      capturedAt: new Date().toISOString(),
+      success: false, blockFound: false, error,
+    };
+  } finally {
+    await page.close();
+  }
+}
+
+/**
+ * Capture screenshots at multiple viewports for a single URL.
+ */
+export async function captureMultiViewport(
+  browser: Browser,
+  url: string,
+  label: string,
+  viewports: ViewportConfig[],
+  outputDir: string,
+  captureConfig: CaptureConfig,
+): Promise<ScreenshotResult[]> {
+  const results: ScreenshotResult[] = [];
+  for (const viewport of viewports) {
+    const result = await captureScreenshot({ browser, url, label, viewport, outputDir, captureConfig });
+    results.push(result);
+  }
+  return results;
+}
+
+/**
  * Poll a URL until it responds with a 200 or the timeout is reached.
- * Used to wait for EDS preview branches to become available.
  */
 export async function waitForUrl(
   url: string,
@@ -239,7 +258,6 @@ export async function waitForUrl(
 
 /**
  * Check whether a URL is reachable and returns a 2xx response.
- * Used to skip pages that are not published on preview/live.
  */
 export async function pageExists(url: string): Promise<boolean> {
   try {

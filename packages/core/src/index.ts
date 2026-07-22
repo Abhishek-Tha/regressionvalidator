@@ -50,7 +50,7 @@ export type { SelectedPage, SelectionResult } from './selection/page-selector.js
 
 // Capture
 export { stabilizePage } from './capture/stabilizer.js';
-export { captureScreenshot, captureMultiViewport, captureBlockClip, launchBrowser, waitForUrl, pageExists } from './capture/screenshot.js';
+export { captureScreenshot, captureMultiViewport, captureBlockClip, navigateAndStabilize, clipBlockFromPage, launchBrowser, waitForUrl, pageExists } from './capture/screenshot.js';
 export type { ScreenshotResult, CapturePageOptions, BlockClipResult } from './capture/screenshot.js';
 
 // Comparison
