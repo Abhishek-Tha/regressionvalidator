@@ -441,12 +441,16 @@ function buildBlockSection(
     })
     .join('');
 
-  // ── Image row ──
+  // ── Image row — prefer per-block screenshot, fall back to full-page ──
   const imgRowCells = comparisons
     .map((c, i) => {
-      const before = toDataUri(c.beforeScreenshot) ?? toRelativeSrc(c.beforeScreenshot, outputDir);
-      const after  = toDataUri(c.afterScreenshot)  ?? toRelativeSrc(c.afterScreenshot, outputDir);
-      const diff   = toDataUri(c.diffScreenshot)   ?? toRelativeSrc(c.diffScreenshot, outputDir);
+      const blockShot = blockName ? c.blockScreenshots?.[blockName] : undefined;
+      const rawBefore = blockShot?.before ?? c.beforeScreenshot;
+      const rawAfter  = blockShot?.after  ?? c.afterScreenshot;
+      const rawDiff   = blockShot?.diff   ?? c.diffScreenshot;
+      const before = toDataUri(rawBefore) ?? toRelativeSrc(rawBefore, outputDir);
+      const after  = toDataUri(rawAfter)  ?? toRelativeSrc(rawAfter,  outputDir);
+      const diff   = toDataUri(rawDiff)   ?? toRelativeSrc(rawDiff,   outputDir);
       return (i > 0 ? `<div class="vp-sep"></div>` : '') +
         shotCell(before) +
         shotCell(after) +

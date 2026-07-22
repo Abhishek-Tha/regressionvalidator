@@ -277,77 +277,90 @@ async function run(): Promise<void> {
           return;
         }
 
-        // Build variation-aware CSS selectors so we clip to the exact changed variant.
-        //
-        // EDS block HTML: <div class="cards body-highlight block initialized">
-        // If only 'body-highlight' variation changed → selector: .cards.body-highlight
-        // If whole block changed (no specific variations) → selector: .cards
-        //
-        const selectors: string[] = [];
-        for (const blockName of affectedBlockNames) {
-          const changedVars = affectedVariations[blockName] ?? [];
-          if (changedVars.length > 0) {
-            // One selector per variation: .cards.body-highlight, .cards.dark, …
-            for (const variation of changedVars) {
-              selectors.push(`.${blockName}.${variation}`);
-            }
-          } else {
-            // Whole block changed — match any instance
-            selectors.push(`.${blockName}`);
-          }
-        }
-        const blockSelector = selectors.length > 0
-          ? selectors.join(', ')
-          : config.blockDetection.selector;
-
         for (const viewport of config.viewports) {
-          core.info(`  Testing ${page.path} @ ${viewport.name} (clip: ${blockSelector})`);
+          core.info(`  Testing ${page.path} @ ${viewport.name}`);
           const compDir = join(outputDir, 'comparisons', page.path.replace(/\//g, '_'), viewport.name);
 
+          // Per-block cropped screenshots: blockName → { before, after, diff }
+          const blockScreenshots: Record<string, { before?: string; after?: string; diff?: string }> = {};
+
+          // Track worst visual diff across all blocks for the overall page status
+          let worstVisual: import('@blockguard/core').VisualDiffResult | undefined;
+          let anyCaptureFailed = false;
+          let captureError: string | undefined;
+
           try {
-            // Capture base and branch screenshots in parallel — clipped to the changed block
-            const [baseShot, branchShot] = await Promise.all([
-              captureBlockClip({
-                browser: sharedBrowser, url: baseUrl, label: 'before',
-                viewport, outputDir: compDir, captureConfig: config.capture,
-                blockSelector,
-              }),
-              captureBlockClip({
-                browser: sharedBrowser, url: branchUrl, label: 'after',
-                viewport, outputDir: compDir, captureConfig: config.capture,
-                blockSelector,
-              }),
-            ]);
+            for (const blockName of affectedBlockNames) {
+              const changedVars = affectedVariations[blockName] ?? [];
+              // Build selector for this specific block
+              const blockSelector = changedVars.length > 0
+                ? changedVars.map((v) => `.${blockName}.${v}`).join(', ')
+                : `.${blockName}`;
 
-            if (!baseShot.blockFound) {
-              core.info(`    Block not found on live (${page.path}) — used full-page fallback`);
-            }
-            if (!branchShot.blockFound && branchShot.success) {
-              core.warning(`    Block '${blockSelector}' missing from preview branch on ${page.path} — possible regression`);
+              const blockCompDir = join(compDir, blockName);
+              core.info(`    Clip block '${blockName}' selector: ${blockSelector}`);
+
+              const [baseShot, branchShot] = await Promise.all([
+                captureBlockClip({
+                  browser: sharedBrowser, url: baseUrl, label: 'before',
+                  viewport, outputDir: blockCompDir, captureConfig: config.capture,
+                  blockSelector,
+                }),
+                captureBlockClip({
+                  browser: sharedBrowser, url: branchUrl, label: 'after',
+                  viewport, outputDir: blockCompDir, captureConfig: config.capture,
+                  blockSelector,
+                }),
+              ]);
+
+              if (!baseShot.blockFound) {
+                core.info(`      '${blockName}' not found on live — used full-page fallback`);
+              }
+              if (!branchShot.blockFound && branchShot.success) {
+                core.warning(`      '${blockName}' missing on preview branch (${page.path}) — possible regression`);
+              }
+
+              if (!baseShot.success || !branchShot.success) {
+                anyCaptureFailed = true;
+                captureError = baseShot.error || branchShot.error;
+                continue;
+              }
+
+              const diffPath = join(blockCompDir, `diff-${viewport.name}.png`);
+              const visual = compareVisuals(baseShot.filePath, branchShot.filePath, diffPath);
+
+              blockScreenshots[blockName] = {
+                before: baseShot.filePath,
+                after: branchShot.filePath,
+                diff: diffPath,
+              };
+
+              // Keep track of the worst diff to drive the overall page status
+              if (!worstVisual || visual.mismatchPercent > (worstVisual.mismatchPercent ?? 0)) {
+                worstVisual = visual;
+              }
             }
 
-            if (!baseShot.success || !branchShot.success) {
+            if (anyCaptureFailed && !worstVisual) {
               comparisons.push({
                 pagePath: page.path, baseUrl, branchUrl, viewport: viewport.name,
                 status: 'unable-to-test', selectionReasons: reasons, affectedBlocks: affectedBlockNames,
-                summary: `Screenshot failed: ${baseShot?.error || branchShot?.error}`,
-                error: baseShot?.error || branchShot?.error,
+                summary: `Screenshot failed: ${captureError}`,
+                error: captureError,
+                blockScreenshots,
               });
               return;
             }
 
-            // Visual diff
-            const diffPath = join(compDir, `diff-${viewport.name}.png`);
-            const visual = compareVisuals(baseShot.filePath, branchShot.filePath, diffPath);
-
+            // Use worst-block visual diff for overall page classification
             const { status, summary } = classifyPageStatus(
               {
                 pagePath: page.path, baseUrl, branchUrl, viewport: viewport.name,
                 selectionReasons: reasons, affectedBlocks: affectedBlockNames,
-                visual,
-                beforeScreenshot: baseShot.filePath,
-                afterScreenshot: branchShot.filePath,
-                diffScreenshot: diffPath,
+                visual: worstVisual,
+                beforeScreenshot: blockScreenshots[affectedBlockNames[0]]?.before,
+                afterScreenshot: blockScreenshots[affectedBlockNames[0]]?.after,
+                diffScreenshot: blockScreenshots[affectedBlockNames[0]]?.diff,
               },
               config.thresholds,
             );
@@ -355,10 +368,11 @@ async function run(): Promise<void> {
             comparisons.push({
               pagePath: page.path, baseUrl, branchUrl, viewport: viewport.name,
               status, selectionReasons: reasons, affectedBlocks: affectedBlockNames,
-              visual, summary,
-              beforeScreenshot: baseShot.filePath,
-              afterScreenshot: branchShot.filePath,
-              diffScreenshot: diffPath,
+              visual: worstVisual, summary,
+              beforeScreenshot: blockScreenshots[affectedBlockNames[0]]?.before,
+              afterScreenshot: blockScreenshots[affectedBlockNames[0]]?.after,
+              diffScreenshot: blockScreenshots[affectedBlockNames[0]]?.diff,
+              blockScreenshots,
             });
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);

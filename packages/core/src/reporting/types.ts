@@ -28,6 +28,11 @@ export interface PageComparisonResult {
   afterScreenshot?: string;
   /** Path to diff image */
   diffScreenshot?: string;
+  /**
+   * Per-block cropped screenshots.
+   * Key = block name (e.g. "cards"). Each entry has before/after/diff paths.
+   */
+  blockScreenshots?: Record<string, { before?: string; after?: string; diff?: string }>;
   error?: string;
 }
 
