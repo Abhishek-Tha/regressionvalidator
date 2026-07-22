@@ -142,12 +142,3 @@ runs:
         INPUT_OUTPUT-DIR: ${{ inputs.output-dir }}
         INPUT_GITHUB-TOKEN: ${{ inputs.github-token }}
       run: node "${{ github.action_path }}/dist-bundled/index.js"
-
-    # ── Upload report as a named artifact (enables MCP get_pr_regression_report) ──
-    - name: Upload BlockGuard Report
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: blockguard-report
-        path: ${{ inputs.output-dir }}/
-        retention-days: 30
