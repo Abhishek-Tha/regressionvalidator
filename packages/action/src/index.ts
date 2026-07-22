@@ -345,6 +345,7 @@ async function run(): Promise<void> {
               comparisons.push({
                 pagePath: page.path, baseUrl, branchUrl, viewport: viewport.name,
                 status: 'unable-to-test', selectionReasons: reasons, affectedBlocks: affectedBlockNames,
+                affectedVariations,
                 summary: `Screenshot failed: ${captureError}`,
                 error: captureError,
                 blockScreenshots,
@@ -357,6 +358,7 @@ async function run(): Promise<void> {
               {
                 pagePath: page.path, baseUrl, branchUrl, viewport: viewport.name,
                 selectionReasons: reasons, affectedBlocks: affectedBlockNames,
+                affectedVariations,
                 visual: worstVisual,
                 beforeScreenshot: blockScreenshots[affectedBlockNames[0]]?.before,
                 afterScreenshot: blockScreenshots[affectedBlockNames[0]]?.after,
@@ -368,6 +370,7 @@ async function run(): Promise<void> {
             comparisons.push({
               pagePath: page.path, baseUrl, branchUrl, viewport: viewport.name,
               status, selectionReasons: reasons, affectedBlocks: affectedBlockNames,
+              affectedVariations,
               visual: worstVisual, summary,
               beforeScreenshot: blockScreenshots[affectedBlockNames[0]]?.before,
               afterScreenshot: blockScreenshots[affectedBlockNames[0]]?.after,

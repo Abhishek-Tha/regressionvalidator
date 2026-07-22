@@ -16,6 +16,11 @@ export interface PageComparisonResult {
   selectionReasons: string[];
   /** Affected block names on this page */
   affectedBlocks: string[];
+  /**
+   * Per-block affected variation class names on this page.
+   * Empty array = all variations of that block are affected.
+   */
+  affectedVariations?: Record<string, string[]>;
   visual?: VisualDiffResult;
   dom?: DomDiffResult[];
   a11y?: A11yDiffResult;

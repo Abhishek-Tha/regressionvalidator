@@ -51,6 +51,27 @@ export function generateHtmlReport(report: RegressionReport, outputDir: string):
   return outputPath;
 }
 
+// ─── Block label helper ───────────────────────────────────────────────────────
+
+/**
+ * Format a block name with its affected variation(s) for display.
+ * e.g. "cards" + ["body-highlight"] → "cards (body-highlight)"
+ *      "columns" + []               → "columns"
+ */
+function blockLabel(
+  blockName: string,
+  comparisons: PageComparisonResult[],
+): string {
+  // Collect all variation sets for this block across all viewport comparisons
+  const varSet = new Set<string>();
+  for (const c of comparisons) {
+    const vars = c.affectedVariations?.[blockName] ?? [];
+    for (const v of vars) varSet.add(v);
+  }
+  if (varSet.size === 0) return blockName;
+  return `${blockName} (${Array.from(varSet).join(', ')})`;
+}
+
 // ─── Group comparisons by pagePath ───────────────────────────────────────────
 
 function groupByPage(
@@ -372,7 +393,7 @@ function buildPageGroup(
   );
 
   const blockChips = allBlocks
-    .map((b) => `<span class="block-chip">🧩 ${escapeHtml(b)}</span>`)
+    .map((b) => `<span class="block-chip">🧩 ${escapeHtml(blockLabel(b, comparisons))}</span>`)
     .join('');
 
   // Build one block section per unique block name
@@ -476,8 +497,9 @@ function buildBlockSection(
       }).join('')}</div>`
     : '';
 
-  const chip = blockName
-    ? `<span class="block-chip">🧩 ${escapeHtml(blockName)}</span>`
+  const label = blockName ? blockLabel(blockName, comparisons) : '';
+  const chip = label
+    ? `<span class="block-chip">🧩 ${escapeHtml(label)}</span>`
     : '';
 
   return `<div class="block-section">
