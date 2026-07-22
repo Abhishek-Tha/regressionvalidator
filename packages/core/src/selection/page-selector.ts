@@ -7,6 +7,11 @@ export interface SelectedPage {
   reasons: string[];
   /** Which block names on this page are affected */
   affectedBlockNames: string[];
+  /**
+   * For each affected block, which variation(s) on this page are affected.
+   * Empty array means all variations are affected.
+   */
+  affectedVariations: Record<string, string[]>;
 }
 
 export interface SelectionResult {
@@ -18,15 +23,28 @@ export interface SelectionResult {
 
 /**
  * Select regression-test pages from the usage index based on the selection config.
+ *
+ * @param affectedVariations  Optional map of blockName → changed variation class names.
+ *   When provided, a page is only included if it actually uses the specified variation.
+ *   An empty array for a block means all variations of that block are affected.
  */
 export function selectRegressionPages(
   pages: IndexedPage[],
   affectedBlockNames: string[],
   config: SelectionConfig,
+  affectedVariations: Record<string, string[]> = {},
 ): SelectionResult {
-  // Filter to only pages that use at least one affected block
+  // Filter to only pages that use at least one affected block (and, if known, the specific variation)
   const affectedPages = pages.filter((page) =>
-    page.blocks.some((b) => affectedBlockNames.includes(b.name)),
+    page.blocks.some((b) => {
+      if (!affectedBlockNames.includes(b.name)) return false;
+      const changedVars = affectedVariations[b.name] ?? [];
+      // If no specific variations are tracked, any page using this block qualifies
+      if (changedVars.length === 0) return true;
+      // Otherwise require the page to actually use one of the changed variations
+      const pageVars = b.variations.map((v) => v.toLowerCase());
+      return changedVars.some((cv) => pageVars.includes(cv.toLowerCase()));
+    }),
   );
 
   if (config.mode === 'full') {
@@ -35,6 +53,7 @@ export function selectRegressionPages(
         page,
         reasons: ['full-mode'],
         affectedBlockNames: getAffectedBlocksOnPage(page, affectedBlockNames),
+        affectedVariations: getAffectedVariationsOnPage(page, affectedBlockNames, affectedVariations),
       })),
       skipped: 0,
       totalAffected: affectedPages.length,
@@ -43,7 +62,7 @@ export function selectRegressionPages(
   }
 
   // Representative mode
-  const selected = selectRepresentativePages(affectedPages, affectedBlockNames, config);
+  const selected = selectRepresentativePages(affectedPages, affectedBlockNames, config, affectedVariations);
 
   return {
     selected,
@@ -57,6 +76,7 @@ function selectRepresentativePages(
   affectedPages: IndexedPage[],
   affectedBlockNames: string[],
   config: SelectionConfig,
+  affectedVariations: Record<string, string[]> = {},
 ): SelectedPage[] {
   const selected: SelectedPage[] = [];
   const selectedPaths = new Set<string>();
@@ -129,7 +149,12 @@ function selectRepresentativePages(
             continue;
           }
 
-          selected.push({ page, reasons, affectedBlockNames: affectedOnPage });
+          selected.push({
+            page,
+            reasons,
+            affectedBlockNames: affectedOnPage,
+            affectedVariations: getAffectedVariationsOnPage(page, affectedBlockNames, affectedVariations),
+          });
           for (const key of newVariations) {
             coveredVariations.set(key, (coveredVariations.get(key) ?? 0) + 1);
           }
@@ -150,6 +175,7 @@ function selectRepresentativePages(
       page,
       reasons: ['high-priority'],
       affectedBlockNames: getAffectedBlocksOnPage(page, affectedBlockNames),
+      affectedVariations: getAffectedVariationsOnPage(page, affectedBlockNames, affectedVariations),
     });
   }
 
@@ -158,4 +184,26 @@ function selectRepresentativePages(
 
 function getAffectedBlocksOnPage(page: IndexedPage, affectedBlockNames: string[]): string[] {
   return page.blocks.filter((b) => affectedBlockNames.includes(b.name)).map((b) => b.name);
+}
+
+/**
+ * For each affected block on a page, return which of the changed variations are present.
+ */
+function getAffectedVariationsOnPage(
+  page: IndexedPage,
+  affectedBlockNames: string[],
+  affectedVariations: Record<string, string[]>,
+): Record<string, string[]> {
+  const result: Record<string, string[]> = {};
+  for (const block of page.blocks) {
+    if (!affectedBlockNames.includes(block.name)) continue;
+    const changedVars = affectedVariations[block.name] ?? [];
+    if (changedVars.length === 0) {
+      result[block.name] = [];
+    } else {
+      const pageVars = block.variations.map((v) => v.toLowerCase());
+      result[block.name] = changedVars.filter((cv) => pageVars.includes(cv.toLowerCase()));
+    }
+  }
+  return result;
 }

@@ -231,10 +231,21 @@ async function run(): Promise<void> {
 
     // ─── Step 4: Select pages ─────────────────────────────────────────────────
     core.startGroup('📋 Selecting test pages');
+
+    // Log detected variations to aid debugging
+    for (const [block, vars] of Object.entries(impact.allAffectedVariations)) {
+      if (vars.length > 0) {
+        core.info(`  Block '${block}' — only variation(s) changed: ${vars.join(', ')}`);
+      } else {
+        core.info(`  Block '${block}' — entire block changed (all variations)`);
+      }
+    }
+
     const selectionResult = selectRegressionPages(
       index.pages,
       impact.allAffectedBlocks,
       config.selection,
+      impact.allAffectedVariations,
     );
     core.info(`Selected ${selectionResult.selected.length} / ${selectionResult.totalAffected} pages`);
     core.endGroup();
@@ -257,7 +268,7 @@ async function run(): Promise<void> {
       }
 
       // Process pages concurrently (3 at a time) with viewports sequential per page
-      await withConcurrency(selectionResult.selected, 3, async ({ page, reasons, affectedBlockNames }) => {
+      await withConcurrency(selectionResult.selected, 3, async ({ page, reasons, affectedBlockNames, affectedVariations }) => {
         const baseUrl = `${liveOrigin}${page.path}`;
         const branchUrl = `${previewOrigin}${page.path}`;
 
@@ -266,10 +277,27 @@ async function run(): Promise<void> {
           return;
         }
 
-        // Build a CSS selector for the first affected block on this page
-        // e.g. "columns" → ".columns" (matches <div class="columns ...">)
-        const blockSelector = affectedBlockNames.length > 0
-          ? affectedBlockNames.map((b) => `.${b}`).join(', ')
+        // Build variation-aware CSS selectors so we clip to the exact changed variant.
+        //
+        // EDS block HTML: <div class="cards body-highlight block initialized">
+        // If only 'body-highlight' variation changed → selector: .cards.body-highlight
+        // If whole block changed (no specific variations) → selector: .cards
+        //
+        const selectors: string[] = [];
+        for (const blockName of affectedBlockNames) {
+          const changedVars = affectedVariations[blockName] ?? [];
+          if (changedVars.length > 0) {
+            // One selector per variation: .cards.body-highlight, .cards.dark, …
+            for (const variation of changedVars) {
+              selectors.push(`.${blockName}.${variation}`);
+            }
+          } else {
+            // Whole block changed — match any instance
+            selectors.push(`.${blockName}`);
+          }
+        }
+        const blockSelector = selectors.length > 0
+          ? selectors.join(', ')
           : config.blockDetection.selector;
 
         for (const viewport of config.viewports) {

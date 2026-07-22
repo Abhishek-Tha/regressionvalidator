@@ -32,6 +32,106 @@ export function getChangedFiles(
 }
 
 /**
+ * Get the full unified diff content for a set of files between two refs.
+ * Returns the raw diff text.
+ */
+export function getDiffContent(
+  baseRef: string,
+  headRef: string,
+  projectRoot: string,
+  files: string[],
+): string {
+  if (files.length === 0) return '';
+  try {
+    const fileArgs = files.map((f) => `"${f}"`).join(' ');
+    return execSync(
+      `git -C "${projectRoot}" diff "${baseRef}...${headRef}" -- ${fileArgs}`,
+      { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], maxBuffer: 10 * 1024 * 1024 },
+    );
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Extract the specific CSS variation class names that were modified in a block's diff.
+ *
+ * EDS blocks use classes like:
+ *   .cards.body-highlight { ... }
+ *   .cards .body-highlight { ... }    ← descendant child
+ *   .body-highlight { ... }           ← inside blocks/cards/cards.css context
+ *
+ * Strategy:
+ *  1. Look at only changed lines (starting with + or -) in the diff.
+ *  2. Extract class selectors that are NOT the block name itself.
+ *  3. Deduplicate and normalise.
+ *  4. If no specific variation selectors are found → treat the entire block as changed.
+ *
+ * @param blockName   The block folder name, e.g. "cards"
+ * @param diffContent Raw unified diff text for the block's CSS files
+ */
+export function extractChangedVariations(blockName: string, diffContent: string): string[] {
+  if (!diffContent.trim()) return [];
+
+  const changedLines = diffContent
+    .split('\n')
+    .filter((line) => (line.startsWith('+') || line.startsWith('-')) && !line.startsWith('+++') && !line.startsWith('---'));
+
+  const variationSet = new Set<string>();
+
+  const blockClass = blockName.replace(/-/g, '[\\-]');
+
+  // Ignored utility/state classes that are not variations
+  const ignored = new Set([
+    blockName,
+    'block',
+    'initialized',
+    'loading',
+    'loaded',
+    'appear',
+    'dark',       // keep 'dark' as it could be a real variation — remove from ignored if needed
+    'is-',
+    'has-',
+  ]);
+  // Remove 'dark' from ignored — it can be a genuine variation
+  ignored.delete('dark');
+
+  for (const line of changedLines) {
+    // Pattern 1: compound .blockname.variation
+    let m: RegExpExecArray | null;
+    const cp = new RegExp(`\\.${blockClass}[.\\s]+\\.([a-z][a-z0-9-]*)`, 'gi');
+    while ((m = cp.exec(line)) !== null) {
+      const v = m[1].toLowerCase();
+      if (!ignored.has(v) && v.length > 1) variationSet.add(v);
+    }
+
+    // Pattern 2: sibling .blockname.variation
+    const sp = new RegExp(`\\.${blockClass}\\.([a-z][a-z0-9-]+)`, 'gi');
+    while ((m = sp.exec(line)) !== null) {
+      const v = m[1].toLowerCase();
+      if (!ignored.has(v) && v.length > 1) variationSet.add(v);
+    }
+
+    // Pattern 3: standalone class selectors — only if the line is a CSS selector line
+    // (i.e. it contains { or , or > after the class name)
+    if (/\.[a-z][a-z0-9-]+\s*[{,>~+]/.test(line)) {
+      const stp = /\.([a-z][a-z0-9-]+)\s*[{,>~+\s]/g;
+      while ((m = stp.exec(line)) !== null) {
+        const v = m[1].toLowerCase();
+        if (!ignored.has(v) && v !== blockName && v.length > 1) {
+          variationSet.add(v);
+        }
+      }
+    }
+  }
+
+  // Clean up: remove the block name itself if it snuck in
+  variationSet.delete(blockName.toLowerCase());
+
+  return Array.from(variationSet);
+}
+
+/**
  * Get the current HEAD commit SHA.
  */
 export function getCurrentCommitSha(projectRoot: string): string {
