@@ -722,16 +722,12 @@ async function handleTriggerPrRegression(args: ToolArgs): Promise<unknown> {
       };
     }
 
+    // Re-run failed — fall through to workflow_dispatch to start a fresh run
     const errText = await rerunRes.text();
-    return {
-      pr: prNumber,
-      status: 'retrigger-failed',
-      workflowRunId: runId,
-      message: `Could not re-run workflow run ${runId}: ${rerunRes.status} — ${errText}`,
-    };
+    process.stderr.write(`Re-run attempt failed (${rerunRes.status}): ${errText} — falling through to workflow_dispatch\n`);
   }
 
-  // ── 3b. No existing run — try workflow_dispatch ───────────────────────────
+  // ── 3b. No existing run (or re-run not possible) — try workflow_dispatch ──
   // Find a workflow file that contains "blockguard" in its name
   const workflowsRes = await ghFetch(`/repos/${owner}/${repo}/actions/workflows`, token);
   if (!workflowsRes.ok) throw new Error(`Could not list workflows: ${workflowsRes.status}`);
